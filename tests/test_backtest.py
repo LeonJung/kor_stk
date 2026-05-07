@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from ks_ws.backtest.driver import BacktestDriver, Position
 from ks_ws.domain import Bar, Side, Signal
+from ks_ws.risk import Risk
 from ks_ws.strategies.allocator import Allocator
 from ks_ws.strategies.base import Strategy
 
@@ -336,3 +337,181 @@ def test_win_rate_with_mixed_outcomes():
 def test_starting_cash_default_is_one_hundred_million_krw():
     result = BacktestDriver.from_strategies([], []).run()
     assert result.cash_krw == 100_000_000
+
+
+# ---------------------------------------------------------------------------
+# Risk integration
+# ---------------------------------------------------------------------------
+
+
+class _BuyMaxOnce(Strategy):
+    """Emit a single full-confidence buy on the first bar of each symbol."""
+
+    name = "buy_max_once"
+
+    def __init__(self) -> None:
+        self._sent: set[str] = set()
+
+    def on_bar(self, bar: Bar) -> list[Signal]:
+        if bar.symbol in self._sent:
+            return []
+        self._sent.add(bar.symbol)
+        return [
+            Signal(
+                symbol=bar.symbol,
+                side=Side.BUY,
+                confidence=1.0,
+                strategy=self.name,
+                timestamp=bar.timestamp,
+            )
+        ]
+
+
+def test_risk_caps_quantity_to_position_limit():
+    """Allocator wants 100 (full confidence * max=100); Risk caps to 30."""
+    bars = _bars_for("005930", [100, 110])
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_BuyMaxOnce()],
+        allocator=Allocator(max_position_per_symbol=100),
+        risk=Risk(max_position_per_symbol=30),
+    ).run()
+    assert result.total_buys == 1
+    assert result.trades[0].quantity == 30
+
+
+def test_risk_blocks_buys_when_at_cap():
+    """Three sequential full-confidence buys, each fills at next bar — Risk
+    cap=50 lets the first land, the next two are rejected outright."""
+    bars = _bars_for("005930", [100, 110, 120, 130])
+
+    class _AlwaysBuy(Strategy):
+        name = "always_buy"
+
+        def on_bar(self, bar: Bar) -> list[Signal]:
+            return [
+                Signal(
+                    symbol=bar.symbol,
+                    side=Side.BUY,
+                    confidence=1.0,
+                    strategy=self.name,
+                    timestamp=bar.timestamp,
+                )
+            ]
+
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_AlwaysBuy()],
+        allocator=Allocator(max_position_per_symbol=50),
+        risk=Risk(max_position_per_symbol=50),
+    ).run()
+    assert result.total_buys == 1
+    assert result.positions["005930"].quantity == 50
+
+
+def test_risk_does_not_cap_sells():
+    """Sell intent passes through Risk regardless of position cap."""
+    bars = _bars_for("005930", [100, 110, 120, 130])
+
+    class _BuyThenSellAll(Strategy):
+        name = "round_trip"
+
+        def __init__(self) -> None:
+            self._counts: dict[str, int] = {}
+
+        def on_bar(self, bar: Bar) -> list[Signal]:
+            c = self._counts.get(bar.symbol, 0) + 1
+            self._counts[bar.symbol] = c
+            if c == 1:
+                return [
+                    Signal(
+                        symbol=bar.symbol,
+                        side=Side.BUY,
+                        confidence=0.5,
+                        strategy=self.name,
+                        timestamp=bar.timestamp,
+                    )
+                ]
+            if c == 3:
+                return [
+                    Signal(
+                        symbol=bar.symbol,
+                        side=Side.SELL,
+                        confidence=1.0,
+                        strategy=self.name,
+                        timestamp=bar.timestamp,
+                    )
+                ]
+            return []
+
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_BuyThenSellAll()],
+        allocator=Allocator(max_position_per_symbol=100),
+        risk=Risk(max_position_per_symbol=50),
+    ).run()
+    # Buy capped to 50 by Risk; sell wants to dump (not capped) and clears it
+    assert result.total_buys == 1
+    assert result.total_sells == 1
+    assert result.positions["005930"].quantity == 0
+
+
+def test_risk_daily_loss_circuit_blocks_further_buys():
+    """Force a losing round trip; once realized PnL ≤ -limit, next buy is
+    blocked."""
+
+    class _BuyThenSellThenBuyAgain(Strategy):
+        name = "loss_then_buy"
+
+        def __init__(self) -> None:
+            self._counts: dict[str, int] = {}
+
+        def on_bar(self, bar: Bar) -> list[Signal]:
+            c = self._counts.get(bar.symbol, 0) + 1
+            self._counts[bar.symbol] = c
+            if c == 1:
+                return [
+                    Signal(
+                        symbol=bar.symbol,
+                        side=Side.BUY,
+                        confidence=1.0,
+                        strategy=self.name,
+                        timestamp=bar.timestamp,
+                    )
+                ]
+            if c == 3:
+                return [
+                    Signal(
+                        symbol=bar.symbol,
+                        side=Side.SELL,
+                        confidence=1.0,
+                        strategy=self.name,
+                        timestamp=bar.timestamp,
+                    )
+                ]
+            if c == 5:
+                return [
+                    Signal(
+                        symbol=bar.symbol,
+                        side=Side.BUY,
+                        confidence=1.0,
+                        strategy=self.name,
+                        timestamp=bar.timestamp,
+                    )
+                ]
+            return []
+
+    # Bar 1=100 (decision), Bar 2=200 (buy fills @ 200, qty 100 → -20000 cash),
+    # Bar 3=50 (decision sell), Bar 4=10 (sell fills @ 10 → realized = (10-200)*100 = -19000),
+    # Bar 5=15 (decision buy), Bar 6=20 (buy intent would fill, blocked by loss circuit).
+    bars = _bars_for("005930", [100, 200, 50, 10, 15, 20])
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_BuyThenSellThenBuyAgain()],
+        allocator=Allocator(max_position_per_symbol=100),
+        risk=Risk(max_position_per_symbol=100, daily_loss_limit_krw=10_000),
+    ).run()
+    # First buy + first sell happen; second buy blocked by daily-loss circuit
+    assert result.total_buys == 1
+    assert result.total_sells == 1
+    assert result.realized_pnl_krw <= -10_000

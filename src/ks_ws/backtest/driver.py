@@ -26,6 +26,7 @@ from datetime import datetime
 from ks_ws.bus import EventBus, Subscription
 from ks_ws.domain import Bar, OrderIntent, Side
 from ks_ws.market.hub import MockMarketDataHub
+from ks_ws.risk import Risk
 from ks_ws.runtime import Runtime
 from ks_ws.strategies.allocator import Allocator
 from ks_ws.strategies.base import Strategy
@@ -128,11 +129,13 @@ class BacktestDriver:
         hub: MockMarketDataHub,
         *,
         starting_cash_krw: int = 100_000_000,
+        risk: Risk | None = None,
     ) -> None:
         self._bars = list(bars)
         self._runtime = runtime
         self._bus = bus
         self._hub = hub
+        self._risk = risk
         self._intent_sub: Subscription[OrderIntent] | None = None
         self._pending: dict[str, list[OrderIntent]] = defaultdict(list)
         self._result = BacktestResult(cash_krw=starting_cash_krw)
@@ -145,12 +148,20 @@ class BacktestDriver:
         *,
         allocator: Allocator | None = None,
         starting_cash_krw: int = 100_000_000,
+        risk: Risk | None = None,
     ) -> "BacktestDriver":
         """Convenience: build the bus / hub / runtime around a strategy list."""
         bus = EventBus()
         hub = MockMarketDataHub(bus)
         rt = Runtime(bus, strategies, allocator or Allocator())
-        return cls(bars, rt, bus, hub, starting_cash_krw=starting_cash_krw)
+        return cls(
+            bars,
+            rt,
+            bus,
+            hub,
+            starting_cash_krw=starting_cash_krw,
+            risk=risk,
+        )
 
     def run(self) -> BacktestResult:
         self._runtime.setup()
@@ -189,6 +200,18 @@ class BacktestDriver:
     def _fill(self, intent: OrderIntent, bar: Bar) -> None:
         fill_price = bar.close
         pos = self._result.positions.setdefault(intent.symbol, Position())
+
+        # Optional risk gate. Treats the entire backtest run as a single
+        # trading day for the daily-loss circuit breaker.
+        if self._risk is not None:
+            approved = self._risk.check(
+                intent,
+                current_position=pos.quantity,
+                realized_pnl_today_krw=self._result.realized_pnl_krw,
+            )
+            if approved is None:
+                return
+            intent = approved
 
         if intent.side == Side.BUY:
             pos.add(intent.quantity, fill_price)
