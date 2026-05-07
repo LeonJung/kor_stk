@@ -137,3 +137,118 @@ def test_async_for_iteration():
 
     received = asyncio.run(run())
     assert [e.multiplier for e in received] == [1.0, 2.0, 3.0]
+
+
+# Close / shutdown ---------------------------------------------------------
+
+
+def test_close_marks_subscription_closed():
+    bus = EventBus()
+    sub = bus.subscribe(VolumeSpike)
+    assert sub.closed is False
+    sub.close()
+    assert sub.closed is True
+
+
+def test_close_is_idempotent():
+    bus = EventBus()
+    sub = bus.subscribe(VolumeSpike)
+    sub.close()
+    sub.close()
+    assert sub.closed is True
+
+
+def test_offer_after_close_returns_false():
+    bus = EventBus()
+    sub = bus.subscribe(VolumeSpike)
+    sub.close()
+    assert sub.offer(_spike()) is False
+
+
+def test_publish_after_close_silently_drops():
+    bus = EventBus()
+    sub = bus.subscribe(VolumeSpike)
+    sub.close()
+    # publish() will offer to closed sub which returns False; total queue
+    # holds only the end-sentinel.
+    bus.publish(_spike())
+    # qsize counts the sentinel
+    assert sub.qsize() == 1
+
+
+def test_async_for_breaks_on_close():
+    async def run():
+        bus = EventBus()
+        sub = bus.subscribe(VolumeSpike)
+        bus.publish(_spike(multiplier=1.0))
+        bus.publish(_spike(multiplier=2.0))
+        sub.close()
+
+        received = []
+        async for event in sub:
+            received.append(event)
+        return received
+
+    received = asyncio.run(run())
+    assert [e.multiplier for e in received] == [1.0, 2.0]
+
+
+def test_close_unblocks_pending_get():
+    async def run():
+        bus = EventBus()
+        sub = bus.subscribe(VolumeSpike)
+
+        async def wait_for_event():
+            try:
+                await sub.get()
+                return "got event"
+            except StopAsyncIteration:
+                return "closed"
+
+        task = asyncio.create_task(wait_for_event())
+        await asyncio.sleep(0)  # let task start awaiting
+        sub.close()
+        return await task
+
+    result = asyncio.run(run())
+    assert result == "closed"
+
+
+def test_get_nowait_raises_after_close_when_empty():
+    import pytest
+
+    bus = EventBus()
+    sub = bus.subscribe(VolumeSpike)
+    sub.close()
+    with pytest.raises(StopAsyncIteration):
+        sub.get_nowait()
+
+
+def test_eventbus_close_closes_all_subscriptions():
+    bus = EventBus()
+    s1 = bus.subscribe(VolumeSpike)
+    s2 = bus.subscribe(GapUp)
+    bus.close()
+    assert s1.closed is True
+    assert s2.closed is True
+    assert bus.closed is True
+    assert bus.subscription_count == 0
+
+
+def test_subscribe_after_bus_close_raises():
+    import pytest
+
+    bus = EventBus()
+    bus.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        bus.subscribe(VolumeSpike)
+
+
+def test_publish_on_closed_bus_is_noop():
+    bus = EventBus()
+    sub = bus.subscribe(VolumeSpike)
+    bus.close()
+    # publish on closed bus should not raise; sub already has sentinel
+    bus.publish(_spike())
+    # No new event accepted into sub
+    assert sub.qsize() == 1  # only sentinel
