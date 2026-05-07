@@ -38,3 +38,8 @@ htmlcov/
 
 # Claude Code local overrides
 .claude/settings.local.json
+.claude/turn_count
+
+# Claude working files (verbose, local-only by default)
+think.md
+todo.md
