@@ -35,6 +35,7 @@ import websockets
 
 from ks_ws.config import Settings, get_settings
 from ks_ws.kis.constants import OAUTH_APPROVAL_PATH, REST_BASE_URL, WS_BASE_URL
+from ks_ws.kis.crypto import aes_cbc_decrypt
 
 log = logging.getLogger("ks_ws.kis.realtime")
 
@@ -113,6 +114,10 @@ class KisRealtimeFeed:
         self.max_reconnect_attempts = max_reconnect_attempts
         self.reconnect_count = 0
 
+        # AES keys for encrypted frames (체결 통보 H0STCNI0 etc.). KIS sends
+        # these in the subscription ack as JSON; we cache by tr_id.
+        self._aes_keys: dict[str, tuple[str, str]] = {}
+
     @property
     def approval_key(self) -> str:
         if self._approval_key is None:
@@ -164,7 +169,10 @@ class KisRealtimeFeed:
             try:
                 async for raw in self._ws:
                     attempts = 0  # reset on any successful frame
-                    yield raw if isinstance(raw, str) else raw.decode("utf-8")
+                    text = raw if isinstance(raw, str) else raw.decode("utf-8")
+                    if text.startswith("{"):
+                        self._maybe_capture_aes_keys(text)
+                    yield text
                 # Iterator ended normally — server closed cleanly.
                 if not self.auto_reconnect:
                     return
@@ -187,6 +195,34 @@ class KisRealtimeFeed:
             except Exception as e:
                 log.warning("WS reconnect attempt %d failed: %s", attempts, e)
                 # Loop will sleep and retry until exhausted.
+
+    def _maybe_capture_aes_keys(self, json_frame: str) -> None:
+        """Inspect a JSON control frame for an AES key/iv subscription ack and
+        cache it by tr_id. KIS sends these alongside encrypted-stream
+        subscriptions (e.g. H0STCNI0)."""
+        try:
+            data = json.loads(json_frame)
+        except json.JSONDecodeError:
+            return
+        header = data.get("header") or {}
+        body = data.get("body") or {}
+        tr_id = header.get("tr_id")
+        output = body.get("output") or {}
+        key = output.get("key")
+        iv = output.get("iv")
+        if tr_id and key and iv:
+            self._aes_keys[tr_id] = (key, iv)
+            log.info("captured AES keys for tr_id=%s", tr_id)
+
+    def decrypt_payload(self, tr_id: str, ciphertext_b64: str) -> str:
+        """Decrypt an encrypted frame body using cached AES keys for tr_id."""
+        if tr_id not in self._aes_keys:
+            raise RuntimeError(f"no AES key cached for tr_id={tr_id}")
+        key, iv = self._aes_keys[tr_id]
+        return aes_cbc_decrypt(ciphertext_b64, key, iv)
+
+    def has_aes_keys(self, tr_id: str) -> bool:
+        return tr_id in self._aes_keys
 
     @staticmethod
     def parse_frame(frame: str) -> tuple[str, str, list[list[str]]]:
