@@ -32,6 +32,7 @@ from ks_ws.bus import EventBus, Subscription
 from ks_ws.domain import OrderIntent, Side
 from ks_ws.orders import OrderRouter, SubmittedOrder
 from ks_ws.risk import Risk
+from ks_ws.storage.ledger import Ledger
 
 log = logging.getLogger("ks_ws.live")
 
@@ -42,15 +43,21 @@ class LiveExecutor:
         bus: EventBus,
         risk: Risk,
         router: OrderRouter,
+        ledger: Ledger | None = None,
     ) -> None:
         self._bus = bus
         self._risk = risk
         self._router = router
+        self._ledger = ledger
         self._sub: Subscription[OrderIntent] | None = None
         self._task: asyncio.Task[None] | None = None
         self._running = False
 
         # In-memory net position per symbol. Used as Risk context only.
+        # This is *submit-based* (optimistic) — every successful submit bumps
+        # the count, ignoring whether the broker actually fills. The Ledger
+        # carries the fill-based view that broker reconciliation eventually
+        # populates via apply_fill_event().
         self._positions: dict[str, int] = {}
         # External accounting feeds this in via update_realized_pnl().
         self._realized_pnl_today_krw = 0
@@ -162,6 +169,11 @@ class LiveExecutor:
             self._failed_submits.append(approved)
             return
         self._submitted.append(result)
+        if self._ledger is not None:
+            try:
+                self._ledger.record_order(result)
+            except Exception:
+                log.exception("ledger.record_order raised for %s", result.order_id)
         self._update_position(approved)
 
     def _update_position(self, intent: OrderIntent) -> None:
@@ -172,3 +184,33 @@ class LiveExecutor:
         else:
             sold = min(current, intent.quantity)
             self._positions[sym] = current - sold
+
+    def apply_fill_event(
+        self,
+        *,
+        order_id: str,
+        symbol: str,
+        side: Side,
+        quantity: int,
+        price: int,
+    ) -> None:
+        """Hook for an external fill source (broker WS / poll / manual reconcile)
+        to inform the executor of an actual fill. Forwards to the Ledger if
+        configured so the fills + positions tables stay accurate.
+
+        Note: this does NOT update the internal optimistic _positions tracker —
+        that one is submit-based on purpose. Risk reads it for live capping.
+        Fill-based position tracking lives in the Ledger.
+        """
+        if self._ledger is None:
+            log.info(
+                "fill event without ledger: order_id=%s symbol=%s qty=%d @ %d",
+                order_id,
+                symbol,
+                quantity,
+                price,
+            )
+            return
+        self._ledger.apply_fill(
+            order_id=order_id, symbol=symbol, side=side, quantity=quantity, price=price
+        )

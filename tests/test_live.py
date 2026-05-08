@@ -215,3 +215,105 @@ def test_submitted_orders_are_typed():
     executor.step()
 
     assert all(isinstance(o, SubmittedOrder) for o in executor.submitted)
+
+
+# Ledger integration --------------------------------------------------------
+
+
+def test_submit_records_order_in_ledger(tmp_path):
+    from ks_ws.storage.ledger import Ledger
+
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    bus = EventBus()
+    executor = LiveExecutor(
+        bus, Risk(max_position_per_symbol=100), MockOrderRouter(), ledger=ledger
+    )
+    executor.setup()
+
+    bus.publish(_intent(qty=5))
+    executor.step()
+
+    rows = ledger.list_orders()
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "005930"
+    assert rows[0]["quantity"] == 5
+    ledger.close()
+
+
+def test_risk_rejection_does_not_record_in_ledger(tmp_path):
+    from ks_ws.storage.ledger import Ledger
+
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    bus = EventBus()
+    executor = LiveExecutor(
+        bus, Risk(daily_loss_limit_krw=1_000_000), MockOrderRouter(), ledger=ledger
+    )
+    executor.setup()
+    executor.update_realized_pnl(-2_000_000)  # past limit
+
+    bus.publish(_intent())
+    executor.step()
+
+    assert ledger.list_orders() == []
+    ledger.close()
+
+
+def test_apply_fill_event_writes_to_ledger(tmp_path):
+    from ks_ws.storage.ledger import Ledger
+
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    bus = EventBus()
+    executor = LiveExecutor(
+        bus, Risk(max_position_per_symbol=100), MockOrderRouter(), ledger=ledger
+    )
+    executor.setup()
+
+    bus.publish(_intent(qty=10))
+    executor.step()
+
+    # Simulate a broker fill at 70_500
+    executor.apply_fill_event(
+        order_id="mock-1",
+        symbol="005930",
+        side=Side.BUY,
+        quantity=10,
+        price=70_500,
+    )
+    pos = ledger.get_position("005930")
+    assert pos is not None
+    assert pos["quantity"] == 10
+    assert pos["average_cost"] == 70_500.0
+    assert len(ledger.list_fills()) == 1
+    ledger.close()
+
+
+def test_apply_fill_without_ledger_only_logs(caplog):
+    bus = EventBus()
+    executor = LiveExecutor(bus, Risk(max_position_per_symbol=100), MockOrderRouter())
+    with caplog.at_level("INFO", logger="ks_ws.live"):
+        executor.apply_fill_event(
+            order_id="mock-1", symbol="005930", side=Side.BUY, quantity=1, price=70_000
+        )
+    assert any("fill event without ledger" in m for m in caplog.messages)
+
+
+def test_ledger_failure_does_not_kill_dispatch(tmp_path):
+    """Ledger.record_order raising is logged, not propagated."""
+    from ks_ws.storage.ledger import Ledger
+
+    class _BrokenLedger(Ledger):
+        def record_order(self, _submitted):
+            raise RuntimeError("disk full")
+
+    ledger = _BrokenLedger(tmp_path / "ledger.sqlite")
+    bus = EventBus()
+    router = MockOrderRouter()
+    executor = LiveExecutor(bus, Risk(max_position_per_symbol=100), router, ledger=ledger)
+    executor.setup()
+
+    bus.publish(_intent())
+    executor.step()
+
+    # Submit still happened, ledger error swallowed
+    assert len(router.submitted) == 1
+    ledger.close()
