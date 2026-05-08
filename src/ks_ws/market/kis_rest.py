@@ -239,6 +239,9 @@ def _parse_price_response(symbol: str, data: dict) -> CurrentPrice:
             data.get("msg1"),
         )
     out = data.get("output") or {}
+    # Previous close: KIS exposes 전일 종가 as 기준가 (stck_sdpr) on the
+    # inquire-price snapshot. stck_prdy_clpr exists in some other endpoints
+    # but is empty here — keep it as a fallback in case behavior changes.
     return CurrentPrice(
         symbol=symbol,
         timestamp=datetime.now(UTC),
@@ -246,7 +249,7 @@ def _parse_price_response(symbol: str, data: dict) -> CurrentPrice:
         open=int(out.get("stck_oprc") or 0),
         high=int(out.get("stck_hgpr") or 0),
         low=int(out.get("stck_lwpr") or 0),
-        prev_close=int(out.get("stck_prdy_clpr") or 0),
+        prev_close=int(out.get("stck_sdpr") or out.get("stck_prdy_clpr") or 0),
         change=int(out.get("prdy_vrss") or 0),
         change_pct=float(out.get("prdy_ctrt") or 0.0),
         volume=int(out.get("acml_vol") or 0),
