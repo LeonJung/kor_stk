@@ -5,7 +5,6 @@ Run:
 """
 
 import sys
-import time
 
 from ks_ws.market.kis_rest import fetch_current_price, fetch_orderbook
 
@@ -13,6 +12,8 @@ from ks_ws.market.kis_rest import fetch_current_price, fetch_orderbook
 def main() -> None:
     symbol = sys.argv[1] if len(sys.argv) > 1 else "005930"
 
+    # The token-bucket rate limiter in kis.http transparently throttles
+    # successive REST calls — no manual sleep needed.
     p = fetch_current_price(symbol)
     print(f"=== Current price ({symbol}) ===")
     print(f"  price:        {p.price:>12,} KRW")
@@ -22,10 +23,6 @@ def main() -> None:
     print(f"  volume:       {p.volume:>12,} 주")
     print(f"  value:        {p.value:>12,} KRW")
     print(f"  timestamp:    {p.timestamp.isoformat()}")
-
-    # KIS 모의투자 rate limit (~2 req/sec) — 짧은 sleep 으로 회피.
-    # 프로덕션에선 client 차원의 rate limiter 필요.
-    time.sleep(0.5)
 
     ob = fetch_orderbook(symbol)
     print(f"\n=== Orderbook ({symbol}) ===")
