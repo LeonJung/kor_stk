@@ -1,0 +1,34 @@
+# Sample multi-strategy portfolio. Edit this file (no code changes) and
+# load via `ks_ws.strategies.config.load_portfolio`.
+#
+# All three reference strategies are wired with conservative defaults.
+# Adjust caps and weights without touching Python.
+
+strategies:
+  - class: ks_ws.strategies.program_flow.ProgramFlowStrategy
+    params:
+      confidence_cap_krw: 5_000_000_000
+      exit_confidence: 0.7
+
+  - class: ks_ws.strategies.volume_spike.VolumeSpikeStrategy
+    params:
+      confidence_cap_multiplier: 5.0
+      confidence_floor: 0.2
+
+  - class: ks_ws.strategies.orderbook_imbalance.OrderbookImbalanceStrategy
+    params:
+      ratio_cap: 4.0
+      confidence_floor: 0.3
+
+  - class: ks_ws.strategies.gap_up.GapUpStrategy
+    params:
+      gap_pct_cap: 8.0
+      confidence_floor: 0.4
+
+allocator:
+  max_position_per_symbol: 10
+  weights:
+    program_flow: 1.0
+    volume_spike: 0.6
+    orderbook_imbalance: 0.4
+    gap_up: 0.7

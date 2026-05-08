@@ -33,8 +33,7 @@ async def run(symbol: str, duration_sec: int) -> None:
             received += 1
             ts = tick.timestamp.astimezone().strftime("%H:%M:%S")
             print(
-                f"  Tick {received:>3}: {ts} {tick.symbol} "
-                f"price={tick.price:,} vol={tick.volume:,}"
+                f"  Tick {received:>3}: {ts} {tick.symbol} price={tick.price:,} vol={tick.volume:,}"
             )
             if received >= 30:
                 break
