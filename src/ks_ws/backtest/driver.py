@@ -3,18 +3,26 @@ runs live. Identical Strategy / Allocator code; no special-cased backtest
 logic anywhere downstream.
 
 Fill model: when a Strategy emits an OrderIntent at time T for symbol X,
-the driver buffers it and fills it at the close of X's *next* bar after T.
-This avoids any lookahead (the strategy decided based on bar T's data and
-the fill happens at the next observable price for that symbol) and
-captures the natural latency between decision and execution.
+the driver buffers it and fills it at the close of X's *next* bar after T,
+optionally with bps slippage applied (positive on buys, negative on
+sells). Avoids lookahead and captures natural decision-to-execution
+latency.
+
+Costs (KRX retail defaults):
+- ``commission_bps`` (default 1.5 bps = 0.015%): brokerage fee, both sides.
+- ``sell_tax_bps`` (default 18 bps = 0.18%): KRX 거래세 + 농어촌특별세
+  combined, sells only.
+Costs are deducted from cash and recorded on each Trade. Realized PnL
+on a sell is net of (commission + tax) and the matching cost basis is
+inflated by buy-side commission via the running average — so backtest
+PnL reflects what would actually land in the account.
 
 Cross-symbol intents simply wait until their target symbol's next bar
 arrives. An intent for a symbol that never appears again sits unfilled —
 the result reports the count.
 
-Cash is tracked but not enforced (negative balances allowed); a real Risk
-layer is the right place for hard limits. Shorting is disallowed: a SELL
-intent is filled only up to the current position; the rest is discarded.
+Shorting is disallowed: a SELL intent is filled only up to the current
+position; the rest is discarded.
 """
 
 import logging
@@ -66,6 +74,8 @@ class Trade:
     quantity: int
     price: int
     realized_pnl_krw: int = 0  # nonzero only on sells that close against a position
+    commission_krw: int = 0
+    tax_krw: int = 0  # sells only
 
 
 @dataclass
@@ -77,6 +87,12 @@ class BacktestResult:
     bars_processed: int = 0
     last_prices: dict[str, int] = field(default_factory=dict)
     unfilled_intents: int = 0
+    total_commission_krw: int = 0
+    total_tax_krw: int = 0
+
+    @property
+    def total_costs_krw(self) -> int:
+        return self.total_commission_krw + self.total_tax_krw
 
     @property
     def total_trades(self) -> int:
@@ -130,12 +146,18 @@ class BacktestDriver:
         *,
         starting_cash_krw: int = 100_000_000,
         risk: Risk | None = None,
+        commission_bps: float = 1.5,
+        sell_tax_bps: float = 18.0,
+        slippage_bps: float = 0.0,
     ) -> None:
         self._bars = list(bars)
         self._runtime = runtime
         self._bus = bus
         self._hub = hub
         self._risk = risk
+        self.commission_bps = commission_bps
+        self.sell_tax_bps = sell_tax_bps
+        self.slippage_bps = slippage_bps
         self._intent_sub: Subscription[OrderIntent] | None = None
         self._pending: dict[str, list[OrderIntent]] = defaultdict(list)
         self._result = BacktestResult(cash_krw=starting_cash_krw)
@@ -149,6 +171,9 @@ class BacktestDriver:
         allocator: Allocator | None = None,
         starting_cash_krw: int = 100_000_000,
         risk: Risk | None = None,
+        commission_bps: float = 1.5,
+        sell_tax_bps: float = 18.0,
+        slippage_bps: float = 0.0,
     ) -> "BacktestDriver":
         """Convenience: build the bus / hub / runtime around a strategy list."""
         bus = EventBus()
@@ -161,6 +186,9 @@ class BacktestDriver:
             hub,
             starting_cash_krw=starting_cash_krw,
             risk=risk,
+            commission_bps=commission_bps,
+            sell_tax_bps=sell_tax_bps,
+            slippage_bps=slippage_bps,
         )
 
     def run(self) -> BacktestResult:
@@ -197,8 +225,18 @@ class BacktestDriver:
         for intent in intents:
             self._fill(intent, bar)
 
+    def _slipped_fill_price(self, side: Side, base_price: int) -> int:
+        """Apply bps slippage in the unfavorable direction. Buyers pay
+        more, sellers receive less."""
+        if self.slippage_bps == 0:
+            return base_price
+        adj = base_price * self.slippage_bps / 10_000
+        if side == Side.BUY:
+            return round(base_price + adj)
+        return round(base_price - adj)
+
     def _fill(self, intent: OrderIntent, bar: Bar) -> None:
-        fill_price = bar.close
+        fill_price = self._slipped_fill_price(intent.side, bar.close)
         pos = self._result.positions.setdefault(intent.symbol, Position())
 
         # Optional risk gate. Treats the entire backtest run as a single
@@ -213,9 +251,13 @@ class BacktestDriver:
                 return
             intent = approved
 
+        gross = fill_price * intent.quantity
+        commission = round(gross * self.commission_bps / 10_000)
+
         if intent.side == Side.BUY:
             pos.add(intent.quantity, fill_price)
-            self._result.cash_krw -= fill_price * intent.quantity
+            self._result.cash_krw -= gross + commission
+            self._result.total_commission_krw += commission
             self._result.trades.append(
                 Trade(
                     timestamp=bar.timestamp,
@@ -223,16 +265,23 @@ class BacktestDriver:
                     side=Side.BUY,
                     quantity=intent.quantity,
                     price=fill_price,
+                    commission_krw=commission,
                 )
             )
             return
 
         # SELL
-        sold, realized = pos.remove(intent.quantity, fill_price)
+        sold, realized_gross = pos.remove(intent.quantity, fill_price)
         if sold == 0:
             return
-        self._result.cash_krw += fill_price * sold
-        self._result.realized_pnl_krw += realized
+        gross_proceeds = fill_price * sold
+        commission_sell = round(gross_proceeds * self.commission_bps / 10_000)
+        tax = round(gross_proceeds * self.sell_tax_bps / 10_000)
+        net_realized = realized_gross - commission_sell - tax
+        self._result.cash_krw += gross_proceeds - commission_sell - tax
+        self._result.realized_pnl_krw += net_realized
+        self._result.total_commission_krw += commission_sell
+        self._result.total_tax_krw += tax
         self._result.trades.append(
             Trade(
                 timestamp=bar.timestamp,
@@ -240,6 +289,8 @@ class BacktestDriver:
                 side=Side.SELL,
                 quantity=sold,
                 price=fill_price,
-                realized_pnl_krw=realized,
+                realized_pnl_krw=net_realized,
+                commission_krw=commission_sell,
+                tax_krw=tax,
             )
         )

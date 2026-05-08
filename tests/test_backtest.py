@@ -183,14 +183,18 @@ def test_buy_intent_fills_on_next_bar():
 
 
 def test_buy_then_sell_records_realized_pnl():
+    """No-cost backtest exercising raw round-trip PnL."""
     bars = _bars_for("005930", [100, 110, 120, 130])
     driver = BacktestDriver.from_strategies(
-        bars, [_BuyOnFirstSellOnThird()], allocator=Allocator(max_position_per_symbol=100)
+        bars,
+        [_BuyOnFirstSellOnThird()],
+        allocator=Allocator(max_position_per_symbol=100),
+        commission_bps=0,
+        sell_tax_bps=0,
     )
     result = driver.run()
     assert result.total_buys == 1
     assert result.total_sells == 1
-    # buy filled at 110, sold at 130, qty capped at owned 50
     sell = next(t for t in result.trades if t.side == Side.SELL)
     assert sell.price == 130
     assert sell.quantity == 50
@@ -216,14 +220,16 @@ def test_sell_with_no_position_is_dropped():
 
 
 def test_cash_decreases_on_buy_and_increases_on_sell():
+    """No-cost cash math: buy 50 @ 110 / sell 50 @ 130."""
     bars = _bars_for("005930", [100, 110, 120, 130])
     result = BacktestDriver.from_strategies(
         bars,
         [_BuyOnFirstSellOnThird()],
         allocator=Allocator(max_position_per_symbol=100),
         starting_cash_krw=10_000_000,
+        commission_bps=0,
+        sell_tax_bps=0,
     ).run()
-    # buy 50 @ 110 = -5500; sell 50 @ 130 = +6500
     expected = 10_000_000 - 5500 + 6500
     assert result.cash_krw == expected
 
@@ -454,6 +460,72 @@ def test_risk_does_not_cap_sells():
     assert result.total_buys == 1
     assert result.total_sells == 1
     assert result.positions["005930"].quantity == 0
+
+
+def test_default_commission_and_tax_are_applied():
+    """One round trip with default commission (1.5 bps) + sell tax (18 bps).
+    Verify cash, realized PnL, and trade-level commission/tax fields."""
+    bars = _bars_for("005930", [100, 110, 120, 130])
+    result = BacktestDriver.from_strategies(
+        bars, [_BuyOnFirstSellOnThird()], allocator=Allocator(max_position_per_symbol=100)
+    ).run()
+
+    buy = next(t for t in result.trades if t.side == Side.BUY)
+    sell = next(t for t in result.trades if t.side == Side.SELL)
+    # Buy 50 @ 110: gross = 5500, commission = round(5500 * 1.5/10000) = 1
+    assert buy.quantity == 50
+    assert buy.price == 110
+    assert buy.commission_krw == round(5500 * 1.5 / 10_000)
+    # Sell 50 @ 130: gross = 6500, commission ~= 1, tax = round(6500 * 18/10000) = 12
+    assert sell.commission_krw == round(6500 * 1.5 / 10_000)
+    assert sell.tax_krw == round(6500 * 18 / 10_000)
+    # realized_pnl = (130-110)*50 - sell_commission - tax
+    assert sell.realized_pnl_krw == 1000 - sell.commission_krw - sell.tax_krw
+    assert result.total_commission_krw == buy.commission_krw + sell.commission_krw
+    assert result.total_tax_krw == sell.tax_krw
+
+
+def test_zero_costs_with_explicit_zeros():
+    bars = _bars_for("005930", [100, 110, 120, 130])
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_BuyOnFirstSellOnThird()],
+        allocator=Allocator(max_position_per_symbol=100),
+        commission_bps=0,
+        sell_tax_bps=0,
+    ).run()
+    assert result.total_commission_krw == 0
+    assert result.total_tax_krw == 0
+    sell = next(t for t in result.trades if t.side == Side.SELL)
+    assert sell.realized_pnl_krw == 1000  # full gross 1000 with no costs
+
+
+def test_buy_slippage_increases_fill_price():
+    bars = _bars_for("005930", [100, 110])
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_BuyOnFirstSellOnThird()],
+        allocator=Allocator(max_position_per_symbol=100),
+        slippage_bps=100,  # 1% adverse
+    ).run()
+    buy = result.trades[0]
+    # Bar2 close = 110, slippage 1% upward → 111
+    assert buy.price == 111
+
+
+def test_sell_slippage_decreases_fill_price():
+    bars = _bars_for("005930", [100, 110, 120, 130])
+    result = BacktestDriver.from_strategies(
+        bars,
+        [_BuyOnFirstSellOnThird()],
+        allocator=Allocator(max_position_per_symbol=100),
+        slippage_bps=100,
+        commission_bps=0,
+        sell_tax_bps=0,
+    ).run()
+    sell = next(t for t in result.trades if t.side == Side.SELL)
+    # Bar4 close = 130, slippage 1% downward → 129
+    assert sell.price == 129
 
 
 def test_risk_daily_loss_circuit_blocks_further_buys():
