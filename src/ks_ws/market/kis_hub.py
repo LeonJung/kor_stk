@@ -13,8 +13,11 @@ Warm tier (REST polling):
   volume — the snapshot is point-in-time, not a trade) plus the actual
   CurrentPrice payload. The REST rate limiter throttles automatically.
 
-Cold tier:
-- Daily-bar batch fetch is left for a follow-up; no automatic action.
+Cold tier (EOD batch):
+- On start(), if a BarStore is provided, the hub fetches the last
+  ``cold_lookback_days`` daily bars for every Tier.COLD symbol via
+  fetch_daily_bars and writes them to BarStore. One-shot at startup;
+  scheduled rotation belongs to a future job runner.
 
 Frame parsers live as module-level functions so tests can drive them
 without a real WS connection.
@@ -30,7 +33,8 @@ from ks_ws.config import Settings, get_settings
 from ks_ws.domain import OrderBook, OrderBookLevel, Tick
 from ks_ws.kis.realtime import KisRealtimeFeed
 from ks_ws.market.hub import MarketDataHub, Tier
-from ks_ws.market.kis_rest import fetch_current_price
+from ks_ws.market.kis_rest import fetch_current_price, fetch_daily_bars
+from ks_ws.storage.bars import BarStore
 
 log = logging.getLogger("ks_ws.market.kis_hub")
 
@@ -114,14 +118,19 @@ class KisMarketDataHub(MarketDataHub):
         *,
         subscribe_orderbook: bool = True,
         warm_poll_interval_sec: float = 30.0,
+        bar_store: BarStore | None = None,
+        cold_lookback_days: int = 90,
     ) -> None:
         super().__init__(bus)
         self._settings = settings or get_settings()
         self._subscribe_orderbook = subscribe_orderbook
         self.warm_poll_interval_sec = warm_poll_interval_sec
+        self._bar_store = bar_store
+        self.cold_lookback_days = cold_lookback_days
         self._feed: KisRealtimeFeed | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._warm_task: asyncio.Task[None] | None = None
+        self._cold_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._feed is not None:
@@ -139,7 +148,15 @@ class KisMarketDataHub(MarketDataHub):
 
         cold = self.symbols_by_tier(Tier.COLD)
         if cold:
-            log.info("COLD tier symbols (%d) recorded but EOD batch not yet wired", len(cold))
+            if self._bar_store is None:
+                log.info(
+                    "COLD tier symbols (%d) recorded but no BarStore — skipping batch",
+                    len(cold),
+                )
+            else:
+                # One-shot batch at startup. Run in a thread so the WS read
+                # loop isn't blocked on the (rate-limited) REST round-trips.
+                self._cold_task = asyncio.create_task(self._cold_batch_load())
 
     async def stop(self) -> None:
         if self._feed is None:
@@ -171,6 +188,34 @@ class KisMarketDataHub(MarketDataHub):
                 self._handle_frame(raw)
         except asyncio.CancelledError:
             pass
+
+    async def _cold_batch_load(self) -> None:
+        """Fetch the most recent ``cold_lookback_days`` daily bars for every
+        COLD symbol and persist them to BarStore. One-shot at startup.
+        """
+        assert self._bar_store is not None
+        end = datetime.now(UTC).date()
+        start = end - timedelta(days=self.cold_lookback_days)
+        for symbol in self.symbols_by_tier(Tier.COLD):
+            try:
+                bars = await asyncio.to_thread(
+                    fetch_daily_bars,
+                    symbol,
+                    start=start,
+                    end=end,
+                    settings=self._settings,
+                )
+            except Exception as e:
+                log.warning("COLD batch failed for %s: %s", symbol, e)
+                continue
+            if not bars:
+                continue
+            try:
+                await asyncio.to_thread(self._bar_store.write, bars)
+            except Exception as e:
+                log.warning("BarStore.write failed for %s: %s", symbol, e)
+                continue
+            log.info("COLD batch wrote %d bars for %s", len(bars), symbol)
 
     async def _warm_poll_loop(self) -> None:
         """Poll fetch_current_price for every WARM symbol on a cadence and

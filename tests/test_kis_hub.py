@@ -238,6 +238,58 @@ def test_subscribe_orderbook_can_be_disabled():
     assert hub._subscribe_orderbook is False
 
 
+def test_cold_batch_writes_to_barstore(monkeypatch, tmp_path):
+    """Hub.start() should fetch and write daily bars for COLD symbols
+    when a BarStore is configured."""
+    import asyncio
+
+    from ks_ws.domain import Bar
+    from ks_ws.market import kis_hub as hub_mod
+    from ks_ws.storage.bars import BarStore
+
+    fetched_for: list[str] = []
+
+    def fake_fetch(symbol, *, start, end, settings=None, **_kw):
+        fetched_for.append(symbol)
+        return [
+            Bar(
+                symbol=symbol,
+                timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+                timeframe="1d",
+                open=70_000,
+                high=70_500,
+                low=69_500,
+                close=70_200,
+                volume=1_000_000,
+                value=70_200_000_000,
+            )
+        ]
+
+    monkeypatch.setattr(hub_mod, "fetch_daily_bars", fake_fetch)
+
+    store = BarStore(tmp_path)
+    bus = EventBus()
+    hub = KisMarketDataHub(bus, bar_store=store, cold_lookback_days=30)
+    hub.assign("005930", Tier.COLD)
+    hub.assign("000660", Tier.COLD)
+
+    asyncio.run(hub._cold_batch_load())
+    assert set(fetched_for) == {"005930", "000660"}
+    # And BarStore should now hold the data
+    bars = list(store.read("005930", "1d"))
+    assert len(bars) == 1
+
+
+def test_cold_batch_skips_when_no_bar_store():
+    """No BarStore → COLD symbols recorded but no fetch attempted on start()."""
+    bus = EventBus()
+    hub = KisMarketDataHub(bus)
+    hub.assign("005930", Tier.COLD)
+    # No assertion crashing — verifying that constructing without bar_store
+    # is fine and tier_of returns the assignment.
+    assert hub.tier_of("005930") == Tier.COLD
+
+
 def test_warm_poll_publishes_currentprice_and_tick(monkeypatch):
     """Single iteration of the WARM poll loop should publish a CurrentPrice
     snapshot and a synthesized Tick (volume=0)."""
