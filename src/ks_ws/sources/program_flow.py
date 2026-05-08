@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from ks_ws.auth.token import get_token
 from ks_ws.config import Settings, get_settings
@@ -32,6 +32,9 @@ _TR_ID_PROGRAM_FLOW = "FHPPG04650201"
 FlowFetcher = Callable[[str], int]
 
 
+_KST = timezone(timedelta(hours=9))
+
+
 def kis_program_flow_fetcher(symbol: str, settings: Settings | None = None) -> int:
     """Call KIS for the latest cumulative net program-buy KRW on a symbol.
 
@@ -39,16 +42,21 @@ def kis_program_flow_fetcher(symbol: str, settings: Settings | None = None) -> i
     that as no flow rather than an error. The exact field name and tr_id may
     drift across KIS spec versions; verify against the live API and adjust
     if the parser starts logging "missing field" warnings.
+
+    KIS requires a date parameter (FID_INPUT_DATE_1, YYYYMMDD KST) — we
+    pass today's KST date.
     """
     settings = settings or get_settings()
     token = get_token(settings)
     client = make_client(settings)
+    today_str = datetime.now(_KST).strftime("%Y%m%d")
     try:
         resp = client.get(
             _PROGRAM_FLOW_PATH,
             params={
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_DATE_1": today_str,
             },
             headers={
                 "authorization": f"Bearer {token}",
@@ -69,16 +77,31 @@ def kis_program_flow_fetcher(symbol: str, settings: Settings | None = None) -> i
         )
         return 0
 
-    out = data.get("output1") or data.get("output") or {}
-    # KIS returns net buy as `whol_ntby_qty` (전체 순매수 수량) or similar
-    # field names. Try the common candidates; document drift with a warning.
-    for key in ("whol_smtm_ntby_qty", "ntby_qty", "ntby_amt", "prgm_ntby_qty"):
-        if key in out:
+    # KIS returns an array of date-bucketed rows in `output` (newest first
+    # for daily, oldest first historically — verified empirically as a
+    # newest-first list at the time of writing). Take the head row.
+    rows = data.get("output") or data.get("output1") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not rows:
+        log.warning("program-trade response had no rows; data keys=%s", list(data)[:5])
+        return 0
+    head = rows[0]
+    # Prefer KRW figure (`_tr_pbmn` = 거래대금) over share count.
+    for key in (
+        "whol_smtn_ntby_tr_pbmn",
+        "whol_smtn_ntby_qty",
+        "whol_ntby_tr_pbmn",
+        "whol_ntby_qty",
+        "prgm_ntby_qty",
+        "ntby_amt",
+    ):
+        if key in head:
             try:
-                return int(out[key])
+                return int(head[key])
             except (ValueError, TypeError):
                 continue
-    log.warning("program-trade response missing net-flow field; got keys=%s", list(out)[:5])
+    log.warning("program-trade response missing net-flow field; got keys=%s", list(head)[:8])
     return 0
 
 

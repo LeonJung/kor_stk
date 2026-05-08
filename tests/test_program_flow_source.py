@@ -137,7 +137,10 @@ def test_kis_fetcher_parses_response(monkeypatch, tmp_path):
         if request.url.path.endswith("/program-trade-by-stock"):
             return httpx.Response(
                 200,
-                json={"rt_cd": "0", "output1": {"whol_smtm_ntby_qty": "1500000000"}},
+                json={
+                    "rt_cd": "0",
+                    "output": [{"whol_smtn_ntby_tr_pbmn": "1500000000"}],
+                },
             )
         return httpx.Response(404)
 
