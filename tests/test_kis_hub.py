@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta, timezone
 
 from ks_ws.bus import EventBus
-from ks_ws.domain import Tick
+from ks_ws.domain import OrderBook, Tick
 from ks_ws.market.hub import Tier
-from ks_ws.market.kis_hub import KisMarketDataHub, parse_trade_record
+from ks_ws.market.kis_hub import KisMarketDataHub, parse_orderbook_record, parse_trade_record
 
 
 def _trade_record(symbol="005930", time_str="103045", price=70_000, volume=10) -> list[str]:
@@ -152,3 +152,87 @@ def test_handle_frame_skips_malformed_records():
 
     hub._handle_frame(frame)
     assert sub.qsize() == 1  # only the good one
+
+
+# OrderBook (H0STASP0) parsing ---------------------------------------------
+
+
+def _orderbook_record() -> list[str]:
+    """Build a 43-field H0STASP0 record:
+    [0]=symbol, [1]=time, [2]=hour_cls, [3..12]=ask prices,
+    [13..22]=bid prices, [23..32]=ask volumes, [33..42]=bid volumes.
+    """
+    rec = [""] * 43
+    rec[0] = "005930"
+    rec[1] = "103045"
+    rec[2] = "0"
+    for i in range(10):
+        rec[3 + i] = str(70_010 + i * 10)  # askp1..10 ascending
+        rec[13 + i] = str(70_000 - i * 10)  # bidp1..10 descending
+        rec[23 + i] = str(100 * (i + 1))  # ask volumes
+        rec[33 + i] = str(200 * (i + 1))  # bid volumes
+    return rec
+
+
+def test_parse_orderbook_record_basic_fields():
+    ob = parse_orderbook_record(_orderbook_record())
+    assert ob is not None
+    assert ob.symbol == "005930"
+    assert len(ob.bids) == 10
+    assert len(ob.asks) == 10
+    # best ask = lowest ask price
+    assert ob.asks[0].price == 70_010
+    assert ob.asks[0].volume == 100
+    # best bid = highest bid price
+    assert ob.bids[0].price == 70_000
+    assert ob.bids[0].volume == 200
+
+
+def test_parse_orderbook_record_short_returns_none():
+    assert parse_orderbook_record(["a", "b", "c"]) is None
+
+
+def test_parse_orderbook_record_skips_zero_levels():
+    rec = _orderbook_record()
+    # zero out levels 5..10 on both sides
+    for i in range(5, 10):
+        rec[3 + i] = "0"
+        rec[23 + i] = "0"
+        rec[13 + i] = "0"
+        rec[33 + i] = "0"
+    ob = parse_orderbook_record(rec)
+    assert ob is not None
+    assert len(ob.asks) == 5
+    assert len(ob.bids) == 5
+
+
+def test_handle_frame_publishes_orderbook_to_bus():
+    bus = EventBus()
+    sub = bus.subscribe(OrderBook)
+    hub = KisMarketDataHub(bus)
+
+    from ks_ws.kis.realtime import KisRealtimeFeed
+
+    class _Stub:
+        parse_frame = staticmethod(KisRealtimeFeed.parse_frame)
+
+    hub._feed = _Stub()  # type: ignore[assignment]
+
+    rec = _orderbook_record()
+    frame = f"0|H0STASP0|001|{'^'.join(rec)}"
+    hub._handle_frame(frame)
+    assert sub.qsize() == 1
+    ob = sub.get_nowait()
+    assert isinstance(ob, OrderBook)
+    assert ob.symbol == "005930"
+    assert len(ob.asks) == 10
+
+
+def test_subscribe_orderbook_can_be_disabled():
+    """Hub constructed with subscribe_orderbook=False must not subscribe
+    H0STASP0 even when HOT symbols are assigned."""
+    bus = EventBus()
+    hub = KisMarketDataHub(bus, subscribe_orderbook=False)
+    hub.assign("005930", Tier.HOT)
+    # We don't actually start() (would need a real WS); just verify the flag.
+    assert hub._subscribe_orderbook is False
