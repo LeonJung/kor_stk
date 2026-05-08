@@ -236,3 +236,55 @@ def test_subscribe_orderbook_can_be_disabled():
     hub.assign("005930", Tier.HOT)
     # We don't actually start() (would need a real WS); just verify the flag.
     assert hub._subscribe_orderbook is False
+
+
+def test_warm_poll_publishes_currentprice_and_tick(monkeypatch):
+    """Single iteration of the WARM poll loop should publish a CurrentPrice
+    snapshot and a synthesized Tick (volume=0)."""
+    import asyncio
+
+    from ks_ws.domain import Tick
+    from ks_ws.market import kis_hub as hub_mod
+    from ks_ws.market.kis_rest import CurrentPrice
+
+    bus = EventBus()
+    tick_sub = bus.subscribe(Tick)
+    price_sub = bus.subscribe(CurrentPrice)
+
+    def fake_fetch(symbol, *, settings=None):
+        return CurrentPrice(
+            symbol=symbol,
+            timestamp=datetime.now(UTC),
+            price=70_000,
+            open=69_500,
+            high=70_500,
+            low=69_000,
+            prev_close=69_800,
+            change=200,
+            change_pct=0.29,
+            volume=10_000,
+            value=700_000_000,
+        )
+
+    monkeypatch.setattr(hub_mod, "fetch_current_price", fake_fetch)
+
+    hub = KisMarketDataHub(bus, warm_poll_interval_sec=0.05)
+    hub.assign("005930", Tier.WARM)
+
+    import contextlib
+
+    async def run_one_iteration():
+        # Run the loop briefly and cancel.
+        task = asyncio.create_task(hub._warm_poll_loop())
+        await asyncio.sleep(0.01)  # allow first iteration to fire
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_one_iteration())
+
+    assert price_sub.qsize() >= 1
+    assert tick_sub.qsize() >= 1
+    tick = tick_sub.get_nowait()
+    assert tick.price == 70_000
+    assert tick.volume == 0  # synthesized — not a real trade

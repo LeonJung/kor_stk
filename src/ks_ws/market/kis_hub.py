@@ -1,4 +1,5 @@
-"""KisMarketDataHub — wires KIS realtime WS into MarketDataHub abstraction.
+"""KisMarketDataHub — wires KIS realtime WS + REST polling into the
+MarketDataHub abstraction.
 
 Hot tier (WS):
 - Subscribes to H0STCNT0 (실시간 체결가) for every Tier.HOT symbol →
@@ -6,9 +7,14 @@ Hot tier (WS):
 - Subscribes to H0STASP0 (실시간 주식호가) for every Tier.HOT symbol →
   publishes OrderBook (10-deep) to the bus.
 
-Symbols assigned ``Tier.WARM`` or ``Tier.COLD`` are remembered but not
-automatically polled / batched yet — slot in cleanly when REST pollers
-and EOD batchers arrive without changing this surface.
+Warm tier (REST polling):
+- For every Tier.WARM symbol, the hub polls fetch_current_price on a
+  configurable cadence and publishes a synthesized Tick (price + 0
+  volume — the snapshot is point-in-time, not a trade) plus the actual
+  CurrentPrice payload. The REST rate limiter throttles automatically.
+
+Cold tier:
+- Daily-bar batch fetch is left for a follow-up; no automatic action.
 
 Frame parsers live as module-level functions so tests can drive them
 without a real WS connection.
@@ -24,6 +30,7 @@ from ks_ws.config import Settings, get_settings
 from ks_ws.domain import OrderBook, OrderBookLevel, Tick
 from ks_ws.kis.realtime import KisRealtimeFeed
 from ks_ws.market.hub import MarketDataHub, Tier
+from ks_ws.market.kis_rest import fetch_current_price
 
 log = logging.getLogger("ks_ws.market.kis_hub")
 
@@ -106,12 +113,15 @@ class KisMarketDataHub(MarketDataHub):
         settings: Settings | None = None,
         *,
         subscribe_orderbook: bool = True,
+        warm_poll_interval_sec: float = 30.0,
     ) -> None:
         super().__init__(bus)
         self._settings = settings or get_settings()
         self._subscribe_orderbook = subscribe_orderbook
+        self.warm_poll_interval_sec = warm_poll_interval_sec
         self._feed: KisRealtimeFeed | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._warm_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._feed is not None:
@@ -124,10 +134,10 @@ class KisMarketDataHub(MarketDataHub):
                 await self._feed.subscribe(_TR_ID_ORDERBOOK, symbol)
         self._reader_task = asyncio.create_task(self._read_frames())
 
-        warm = self.symbols_by_tier(Tier.WARM)
+        if self.symbols_by_tier(Tier.WARM):
+            self._warm_task = asyncio.create_task(self._warm_poll_loop())
+
         cold = self.symbols_by_tier(Tier.COLD)
-        if warm:
-            log.info("WARM tier symbols (%d) recorded but REST polling not yet wired", len(warm))
         if cold:
             log.info("COLD tier symbols (%d) recorded but EOD batch not yet wired", len(cold))
 
@@ -141,6 +151,10 @@ class KisMarketDataHub(MarketDataHub):
                     await self._feed.unsubscribe(_TR_ID_ORDERBOOK, symbol)
             except Exception as e:
                 log.warning("unsubscribe %s failed: %s", symbol, e)
+        if self._warm_task is not None:
+            self._warm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._warm_task
         if self._reader_task is not None:
             self._reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -148,12 +162,40 @@ class KisMarketDataHub(MarketDataHub):
         await self._feed.__aexit__(None, None, None)
         self._feed = None
         self._reader_task = None
+        self._warm_task = None
 
     async def _read_frames(self) -> None:
         assert self._feed is not None
         try:
             async for raw in self._feed:
                 self._handle_frame(raw)
+        except asyncio.CancelledError:
+            pass
+
+    async def _warm_poll_loop(self) -> None:
+        """Poll fetch_current_price for every WARM symbol on a cadence and
+        publish a synthesized Tick (volume=0, price = current). The REST
+        rate limiter handles per-call throttling automatically."""
+        try:
+            while True:
+                for symbol in self.symbols_by_tier(Tier.WARM):
+                    try:
+                        snap = await asyncio.to_thread(
+                            fetch_current_price, symbol, settings=self._settings
+                        )
+                    except Exception as e:
+                        log.warning("WARM poll failed for %s: %s", symbol, e)
+                        continue
+                    self._bus.publish(snap)
+                    self._bus.publish(
+                        Tick(
+                            symbol=snap.symbol,
+                            timestamp=snap.timestamp,
+                            price=snap.price,
+                            volume=0,
+                        )
+                    )
+                await asyncio.sleep(self.warm_poll_interval_sec)
         except asyncio.CancelledError:
             pass
 
