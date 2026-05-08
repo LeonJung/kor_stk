@@ -103,3 +103,95 @@ def test_subscribe_without_connect_raises():
         import asyncio
 
         asyncio.run(feed.subscribe("H0STCNT0", "005930"))
+
+
+def test_subscriptions_tracked_for_replay():
+    """subscribe() / unsubscribe() update the replay set even though we
+    can't send actual messages without a live WS."""
+    import asyncio
+
+    feed = KisRealtimeFeed()
+    feed._approval_key = "FAKE"
+
+    # Stub the websocket so subscribe doesn't blow up on send.
+    class _StubWS:
+        async def send(self, _msg):
+            pass
+
+    feed._ws = _StubWS()  # type: ignore[assignment]
+
+    asyncio.run(feed.subscribe("H0STCNT0", "005930"))
+    asyncio.run(feed.subscribe("H0STASP0", "005930"))
+    assert ("H0STCNT0", "005930") in feed._subscriptions
+    assert ("H0STASP0", "005930") in feed._subscriptions
+
+    asyncio.run(feed.unsubscribe("H0STCNT0", "005930"))
+    assert ("H0STCNT0", "005930") not in feed._subscriptions
+    assert ("H0STASP0", "005930") in feed._subscriptions
+
+
+def test_reconnect_replays_subscriptions(monkeypatch):
+    """On reconnect, every subscribe() recorded prior must be replayed."""
+    import asyncio
+
+    sends: list[str] = []
+    connect_count = [0]
+
+    class _StubWS:
+        async def send(self, msg):
+            sends.append(msg)
+
+        async def close(self):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    async def fake_connect(_url):
+        connect_count[0] += 1
+        return _StubWS()
+
+    monkeypatch.setattr("ks_ws.kis.realtime.websockets.connect", fake_connect)
+    monkeypatch.setattr("ks_ws.kis.realtime.fetch_approval_key", lambda _settings=None: "FAKE-KEY")
+
+    feed = KisRealtimeFeed()
+    feed._subscriptions.add(("H0STCNT0", "005930"))
+    feed._subscriptions.add(("H0STASP0", "005930"))
+
+    asyncio.run(feed._connect())
+    assert connect_count[0] == 1
+    # Every replay produced a register message
+    register_msgs = [m for m in sends if '"tr_type": "1"' in m]
+    assert len(register_msgs) == 2
+    assert any('"tr_id": "H0STCNT0"' in m for m in register_msgs)
+    assert any('"tr_id": "H0STASP0"' in m for m in register_msgs)
+
+
+def test_reconnect_disabled_returns_on_close():
+    """auto_reconnect=False: when WS iterator finishes, async-for ends."""
+    import asyncio
+
+    class _EmptyWS:
+        async def close(self):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    feed = KisRealtimeFeed(auto_reconnect=False)
+    feed._approval_key = "FAKE"
+    feed._ws = _EmptyWS()  # type: ignore[assignment]
+
+    async def run():
+        out = []
+        async for raw in feed:
+            out.append(raw)
+        return out
+
+    assert asyncio.run(run()) == []

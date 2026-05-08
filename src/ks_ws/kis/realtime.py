@@ -13,12 +13,19 @@ Two pieces:
    specific tr_ids (체결, 호가, etc.) lives in a separate module so the
    transport layer stays thin.
 
+   Auto-reconnect: when the underlying WS connection drops the iterator
+   transparently waits ``reconnect_delay``, fetches a fresh approval
+   key, reopens the connection, replays every prior subscribe(), and
+   resumes yielding frames. After ``max_reconnect_attempts`` consecutive
+   failures the iterator gives up (StopAsyncIteration).
+
 KIS WS frame format is *not* JSON — the body is pipe / caret-delimited
 text. Tests cover the pieces that can be mocked at the HTTP and message-
 construction level; integration with a real WS server is left to the
 verify-style example scripts.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -81,16 +88,30 @@ class KisRealtimeFeed:
     Usage::
 
         feed = KisRealtimeFeed()
-        async with feed.connect():
+        async with feed:
             await feed.subscribe("H0STCNT0", "005930")
             async for frame in feed:
                 ... # parse per tr_id
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        auto_reconnect: bool = True,
+        reconnect_delay: float = 2.0,
+        max_reconnect_attempts: int = 5,
+    ) -> None:
         self._settings = settings or get_settings()
         self._approval_key: str | None = None
         self._ws: websockets.ClientConnection | None = None
+        # Subscriptions are kept so we can replay them on reconnect.
+        self._subscriptions: set[tuple[str, str]] = set()
+
+        self.auto_reconnect = auto_reconnect
+        self.reconnect_delay = reconnect_delay
+        self.max_reconnect_attempts = max_reconnect_attempts
+        self.reconnect_count = 0
 
     @property
     def approval_key(self) -> str:
@@ -99,11 +120,7 @@ class KisRealtimeFeed:
         return self._approval_key
 
     async def __aenter__(self) -> "KisRealtimeFeed":
-        url = WS_BASE_URL[self._settings.env]
-        # Pre-fetch approval key synchronously before opening WS — KIS
-        # rejects the first frame if the key isn't ready by handshake.
-        _ = self.approval_key
-        self._ws = await websockets.connect(url)
+        await self._connect()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -111,23 +128,65 @@ class KisRealtimeFeed:
             await self._ws.close()
             self._ws = None
 
+    async def _connect(self) -> None:
+        url = WS_BASE_URL[self._settings.env]
+        # Pre-fetch approval key synchronously before opening WS — KIS
+        # rejects the first frame if the key isn't ready by handshake.
+        _ = self.approval_key
+        self._ws = await websockets.connect(url)
+        # Replay every stored subscription. Empty on the very first connect.
+        for tr_id, tr_key in list(self._subscriptions):
+            await self._send_subscribe(tr_id, tr_key, register=True)
+
+    async def _send_subscribe(self, tr_id: str, tr_key: str, *, register: bool) -> None:
+        assert self._ws is not None
+        msg = build_subscribe_message(self.approval_key, tr_id, tr_key, register=register)
+        await self._ws.send(msg)
+
     async def subscribe(self, tr_id: str, tr_key: str) -> None:
         if self._ws is None:
             raise RuntimeError("KisRealtimeFeed: not connected (use `async with`)")
-        msg = build_subscribe_message(self.approval_key, tr_id, tr_key, register=True)
-        await self._ws.send(msg)
+        self._subscriptions.add((tr_id, tr_key))
+        await self._send_subscribe(tr_id, tr_key, register=True)
 
     async def unsubscribe(self, tr_id: str, tr_key: str) -> None:
         if self._ws is None:
             raise RuntimeError("KisRealtimeFeed: not connected")
-        msg = build_subscribe_message(self.approval_key, tr_id, tr_key, register=False)
-        await self._ws.send(msg)
+        self._subscriptions.discard((tr_id, tr_key))
+        await self._send_subscribe(tr_id, tr_key, register=False)
 
     async def __aiter__(self) -> AsyncIterator[str]:
         if self._ws is None:
             raise RuntimeError("KisRealtimeFeed: not connected")
-        async for raw in self._ws:
-            yield raw if isinstance(raw, str) else raw.decode("utf-8")
+        attempts = 0
+        while True:
+            assert self._ws is not None
+            try:
+                async for raw in self._ws:
+                    attempts = 0  # reset on any successful frame
+                    yield raw if isinstance(raw, str) else raw.decode("utf-8")
+                # Iterator ended normally — server closed cleanly.
+                if not self.auto_reconnect:
+                    return
+            except websockets.ConnectionClosed as e:
+                log.warning("KIS WS closed (%s); reconnect=%s", e, self.auto_reconnect)
+                if not self.auto_reconnect:
+                    return
+
+            attempts += 1
+            self.reconnect_count += 1
+            if attempts > self.max_reconnect_attempts:
+                log.error("WS reconnect gave up after %d attempts", self.max_reconnect_attempts)
+                return
+            await asyncio.sleep(self.reconnect_delay)
+            try:
+                # Force a fresh approval key — old one may have expired.
+                self._approval_key = None
+                await self._connect()
+                log.info("WS reconnected (attempt %d)", attempts)
+            except Exception as e:
+                log.warning("WS reconnect attempt %d failed: %s", attempts, e)
+                # Loop will sleep and retry until exhausted.
 
     @staticmethod
     def parse_frame(frame: str) -> tuple[str, str, list[list[str]]]:
@@ -153,9 +212,6 @@ class KisRealtimeFeed:
             count = int(count_s)
         except ValueError:
             return (tr_id, enc, [payload.split("^")])
-        # Each record is a fixed number of fields per tr_id, but we don't
-        # know that here — split the whole payload by `^` and chunk by
-        # (len // count) when count > 1.
         fields = payload.split("^")
         if count <= 1 or len(fields) % count != 0:
             return (tr_id, enc, [fields])
