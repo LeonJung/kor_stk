@@ -42,4 +42,8 @@ htmlcov/
 
 # Claude working files (verbose, local-only by default)
 think.md
+think_archive/
 todo.md
+strategy.md
+strategy_book.md
+response_rule.md

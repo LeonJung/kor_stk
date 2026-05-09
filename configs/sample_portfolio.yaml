@@ -25,6 +25,29 @@ strategies:
       gap_pct_cap: 8.0
       confidence_floor: 0.4
 
+  # 책 주력: 대장주 상한가 → 후속주 매수, 5분 내 익절/손절/횡보청산
+  - class: ks_ws.strategies.pair_follow.PairFollowStrategy
+    params:
+      pairs:
+        # 예시 페어 (실제 사용 시 PreMarketWatchlistBuilder 결과로 교체)
+        A005930: A000660  # 삼성전자(대장) → SK하이닉스(후속) — 반도체
+      take_profit_pct: 2.5
+      stop_loss_pct: 1.5
+      hold_timeout_seconds: 300
+      flat_timeout_seconds: 60
+      flat_band_pct: 0.5
+      confidence: 0.7
+
+  # 09:03-09:25 시초가 모멘텀, 09:50 강제 청산
+  - class: ks_ws.strategies.opening_momentum.OpeningMomentumStrategy
+    params:
+      watchlist: !!set
+        ? A005930
+        ? A000660
+      surge_pct: 5.0
+      take_profit_pct: 3.0
+      confidence: 0.6
+
 allocator:
   max_position_per_symbol: 10
   weights:
@@ -32,3 +55,5 @@ allocator:
     volume_spike: 0.6
     orderbook_imbalance: 0.4
     gap_up: 0.7
+    pair_follow: 1.0      # 책 주력 매매
+    opening_momentum: 0.8

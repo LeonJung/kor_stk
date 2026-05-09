@@ -57,3 +57,28 @@ class GapUp(Event):
     """Open price gapped up vs previous close beyond the threshold percentage."""
 
     gap_pct: float
+
+
+class LimitUpReached(Event):
+    """Stock price reached daily limit-up (+30% vs previous close).
+
+    Emitted when the latest tick price >= the limit-up price for that
+    symbol. ``limit_up_price`` is the broker-rounded threshold (KRX tick
+    size aware). Followers in 짝꿍 매매 (pair trading) react to this for
+    the leader.
+    """
+
+    limit_up_price: int
+    prev_close: int
+
+
+class LimitUpBroken(Event):
+    """Stock that reached limit-up has fallen back below it (limit broke).
+
+    Emitted within seconds of best_bid dropping below limit_up_price for
+    a symbol previously in LimitUpReached state. Pair followers should
+    immediately exit on this event (매수 기준 훼손).
+    """
+
+    limit_up_price: int
+    current_price: int
