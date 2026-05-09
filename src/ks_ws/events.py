@@ -82,3 +82,17 @@ class LimitUpBroken(Event):
 
     limit_up_price: int
     current_price: int
+
+
+class DojiCandle(Event):
+    """Daily bar形成 a doji pattern (open ≈ close, small body relative to range).
+
+    Emitted when |open - close| / open < body_pct_threshold AND the bar
+    has meaningful range (high - low > 0). Doji = market indecision; in
+    종가 베팅 (closing bet) the doji on a daily bar at session-close
+    signals a potential resolve next day.
+    """
+
+    body_pct: float  # |open - close| / open * 100
+    range_pct: float  # (high - low) / open * 100
+    direction_hint: str  # "neutral" / "uptrend" / "downtrend" — context only

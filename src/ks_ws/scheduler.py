@@ -47,7 +47,10 @@ class _Schedule:
     daily_minute: int | None = None
     tz: timezone = field(default=_DEFAULT_TZ)
     run_immediately: bool = False
+    only_when_market_open: bool = False
+    only_on_trading_day: bool = False
     run_count: int = 0
+    skipped_count: int = 0
     error_count: int = 0
 
 
@@ -81,6 +84,8 @@ class Scheduler:
         name: str,
         job: JobFn,
         run_immediately: bool = False,
+        only_when_market_open: bool = False,
+        only_on_trading_day: bool = False,
     ) -> None:
         if seconds <= 0:
             raise ValueError("seconds must be positive")
@@ -90,6 +95,8 @@ class Scheduler:
                 job=job,
                 interval_sec=seconds,
                 run_immediately=run_immediately,
+                only_when_market_open=only_when_market_open,
+                only_on_trading_day=only_on_trading_day,
             )
         )
 
@@ -101,6 +108,7 @@ class Scheduler:
         name: str,
         job: JobFn,
         tz: timezone | None = None,
+        only_on_trading_day: bool = False,
     ) -> None:
         if not (0 <= hour < 24 and 0 <= minute < 60):
             raise ValueError("hour ∈ [0, 24) and minute ∈ [0, 60)")
@@ -111,6 +119,7 @@ class Scheduler:
                 daily_hour=hour,
                 daily_minute=minute,
                 tz=tz or _DEFAULT_TZ,
+                only_on_trading_day=only_on_trading_day,
             )
         )
 
@@ -151,6 +160,10 @@ class Scheduler:
             pass
 
     async def _fire(self, schedule: _Schedule) -> None:
+        if not _calendar_allows(schedule):
+            schedule.skipped_count += 1
+            log.debug("schedule %s skipped (market closed / non-trading day)", schedule.name)
+            return
         schedule.run_count += 1
         try:
             result = schedule.job()
@@ -159,3 +172,17 @@ class Scheduler:
         except Exception:
             schedule.error_count += 1
             log.exception("scheduled job %s raised", schedule.name)
+
+
+def _calendar_allows(schedule: _Schedule) -> bool:
+    """Calendar-aware gate. Defers import to avoid circular dependency."""
+    if not (schedule.only_when_market_open or schedule.only_on_trading_day):
+        return True
+    from ks_ws.calendar import is_market_open, is_trading_day
+
+    now = datetime.now(schedule.tz)
+    if schedule.only_when_market_open and not is_market_open(now):
+        return False
+    if schedule.only_on_trading_day and not is_trading_day(now.date()):
+        return False
+    return True

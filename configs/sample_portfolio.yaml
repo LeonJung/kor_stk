@@ -48,6 +48,13 @@ strategies:
       take_profit_pct: 3.0
       confidence: 0.6
 
+  # 13:30~ 도지 캔들 종가 베팅, 다음날 시초가 청산
+  - class: ks_ws.strategies.closing_bet.ClosingBetStrategy
+    params:
+      take_profit_pct: 2.0
+      stop_loss_pct: 3.0
+      confidence: 0.5
+
 allocator:
   max_position_per_symbol: 10
   weights:
@@ -57,3 +64,4 @@ allocator:
     gap_up: 0.7
     pair_follow: 1.0      # 책 주력 매매
     opening_momentum: 0.8
+    closing_bet: 0.5
