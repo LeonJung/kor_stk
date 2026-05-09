@@ -29,8 +29,10 @@ strategies:
   - class: ks_ws.strategies.pair_follow.PairFollowStrategy
     params:
       pairs:
-        # 예시 페어 (실제 사용 시 PreMarketWatchlistBuilder 결과로 교체)
+        # 실제 사용 시 PreMarketWatchlistBuilder 결과로 교체
         A005930: A000660  # 삼성전자(대장) → SK하이닉스(후속) — 반도체
+        WMM: WM           # 위메이드맥스 → 위메이드 — 게임 (book 사례)
+        LDR2: FOL2        # synthetic 시나리오용
       take_profit_pct: 2.5
       stop_loss_pct: 1.5
       hold_timeout_seconds: 300
@@ -55,6 +57,38 @@ strategies:
       stop_loss_pct: 3.0
       confidence: 0.5
 
+  # F VWAP 회귀 — 횡보장 적합 (RegimeGate 외부 wrap 권장)
+  - class: ks_ws.strategies.vwap_reversion.VWAPMeanReversionStrategy
+    params:
+      entry_sigma: 1.5
+      stop_sigma: 2.5
+      volume_spike_multiplier: 3.0
+      confidence: 0.5
+
+  # H 우선주-본주 페어 — 상승장 default off (운영 시 RegimeGate 권장)
+  - class: ks_ws.strategies.preferred_pair.PreferredCommonPairStrategy
+    params:
+      pairs:
+        # 예시: 삼성전자우(A005935) ↔ 삼성전자(A005930)
+        A005935: A005930
+      entry_sigma: 2.0
+      stop_sigma: 3.0
+      warmup_samples: 30
+      confidence: 0.4
+
+  # J 수급 추적 — 13:30 이후 외국인+기관 일치 신호
+  - class: ks_ws.strategies.inst_fgn_flow.InstFgnFlowStrategy
+    params:
+      min_fgn_streak: 3
+      confidence: 0.6
+
+  # K 바닥 거래량 급증 — 60일 저점 ±5% + 거래량 spike
+  - class: ks_ws.strategies.bottom_volume_spike.BottomVolumeSpikeStrategy
+    params:
+      take_profit_pct: 7.0
+      stop_below_low_pct: 2.0
+      confidence: 0.4
+
 allocator:
   max_position_per_symbol: 10
   weights:
@@ -62,6 +96,10 @@ allocator:
     volume_spike: 0.6
     orderbook_imbalance: 0.4
     gap_up: 0.7
-    pair_follow: 1.0      # 책 주력 매매
+    pair_follow: 1.0          # 책 주력 매매
     opening_momentum: 0.8
     closing_bet: 0.5
+    vwap_reversion: 0.5
+    preferred_common_pair: 0.4
+    inst_fgn_flow: 0.7
+    bottom_volume_spike: 0.4

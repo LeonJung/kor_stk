@@ -84,6 +84,28 @@ class LimitUpBroken(Event):
     current_price: int
 
 
+class ForeignNetBuy(Event):
+    """Foreign investor net buy / sell flow over a rolling window.
+
+    delta_krw > 0 = net buying. Strategies (J InstFgnFlow) accumulate this
+    over multiple events to detect persistent institutional interest.
+    """
+
+    delta_krw: int
+    window_seconds: int
+
+
+class SixtyDayLow(Event):
+    """Symbol price entered the bottom band (within ``band_pct`` of 60-day
+    low) AND a recent volume spike accompanied the dip. K BottomVolumeSpike
+    consumes this as a trial-position trigger."""
+
+    low_price: int
+    current_price: int
+    band_pct: float
+    volume_multiplier: float
+
+
 class DojiCandle(Event):
     """Daily bar形成 a doji pattern (open ≈ close, small body relative to range).
 
