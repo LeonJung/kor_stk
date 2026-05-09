@@ -1,11 +1,9 @@
 """Risk — gating layer between OrderIntent generation and broker submission.
 
-The Risk layer is intentionally stateless. It inspects an intent against
-caller-supplied portfolio context (current position for the symbol,
-realized PnL "today") and either approves it (possibly with a reduced
-quantity) or rejects it (returns ``None``). State management belongs to
-the caller — BacktestDriver tracks its own positions; a future Live
-executor will reconcile with the broker.
+The Risk layer is intentionally stateless (the ``Risk`` v1 class). It
+inspects an intent against caller-supplied portfolio context (current
+position for the symbol, realized PnL "today") and either approves it
+(possibly with a reduced quantity) or rejects it (returns ``None``).
 
 Two checks for v1:
 
@@ -17,9 +15,17 @@ Two checks for v1:
   intent is rejected outright until the run resets the counter
   (backtest treats the entire run as one trading day; live mode resets
   daily). ``None`` disables the breaker.
+
+For end-to-end live operation, ``EnhancedRisk`` chains the v1 ``Risk``
+gate with ``LossResponseProtocol`` (Sec 20: 한 방 금지 / recovery_mode)
+and ``PsychologyGuard`` (Sec 15, 19: 충동·복수 매매 차단). Each layer
+returns either an adjusted intent or None; the chain composes left-to-
+right so any rejection short-circuits.
 """
 
 from ks_ws.domain import OrderIntent, Side
+from ks_ws.loss_response import LossResponseProtocol
+from ks_ws.psychology import PsychologyGuard
 
 
 class Risk:
@@ -59,3 +65,57 @@ class Risk:
                 return intent.model_copy(update={"quantity": allowed})
 
         return intent
+
+
+class EnhancedRisk:
+    """Composite risk gate: base Risk → LossResponseProtocol → PsychologyGuard.
+
+    Chain semantics (left-to-right):
+    1. ``Risk.check`` (position cap + daily loss circuit breaker)
+    2. ``LossResponseProtocol.apply`` (cooldown / recovery scaling)
+    3. ``PsychologyGuard.apply`` (revenge-trade / surge cooldown)
+
+    Any layer returning None short-circuits and rejects the order.
+    Quantity reductions compound naturally through the pipeline.
+
+    Stateless across instances except the wrapped LossResponseProtocol /
+    PsychologyGuard, which carry their own state. Caller is responsible
+    for calling ``.record_trade(pnl_krw)`` on the loss protocol and
+    ``.record_fill(symbol, side, pnl_krw)`` on the psychology guard
+    after each fill is realized.
+    """
+
+    def __init__(
+        self,
+        *,
+        risk: Risk,
+        loss_protocol: LossResponseProtocol | None = None,
+        psychology: PsychologyGuard | None = None,
+    ) -> None:
+        self.risk = risk
+        self.loss_protocol = loss_protocol
+        self.psychology = psychology
+
+    def check(
+        self,
+        intent: OrderIntent,
+        *,
+        current_position: int = 0,
+        realized_pnl_today_krw: int = 0,
+    ) -> OrderIntent | None:
+        out = self.risk.check(
+            intent,
+            current_position=current_position,
+            realized_pnl_today_krw=realized_pnl_today_krw,
+        )
+        if out is None:
+            return None
+        if self.loss_protocol is not None:
+            out = self.loss_protocol.apply(out, when=intent.timestamp)
+            if out is None:
+                return None
+        if self.psychology is not None:
+            out = self.psychology.apply(out, when=intent.timestamp)
+            if out is None:
+                return None
+        return out
