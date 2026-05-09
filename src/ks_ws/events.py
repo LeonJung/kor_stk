@@ -106,6 +106,28 @@ class SixtyDayLow(Event):
     volume_multiplier: float
 
 
+class TrendShift(Event):
+    """Market trend regime has shifted (uptrend ↔ sideways ↔ downtrend) and/or
+    rolling strategy expectancy collapsed. Risk consumers should pause new
+    entries and reduce size until the new regime stabilizes.
+    """
+
+    from_regime: str
+    to_regime: str
+    expectancy_drop_pct: float  # negative = drop
+
+
+class ManiaSignal(Event):
+    """High attention/mania score for a symbol or theme: extreme combination
+    of turnover, abs(change_pct) and news mentions. Useful as a trigger for
+    cooldown / countertrend bets."""
+
+    score: float  # 0~1, higher = more manic
+    turnover_krw: int
+    change_pct: float
+    news_count: int
+
+
 class DojiCandle(Event):
     """Daily bar形成 a doji pattern (open ≈ close, small body relative to range).
 
