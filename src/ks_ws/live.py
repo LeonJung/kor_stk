@@ -31,7 +31,7 @@ import logging
 from ks_ws.bus import EventBus, Subscription
 from ks_ws.domain import OrderIntent, Side
 from ks_ws.orders import OrderRouter, SubmittedOrder
-from ks_ws.risk import Risk
+from ks_ws.risk import EnhancedRisk, Risk
 from ks_ws.storage.ledger import Ledger
 
 log = logging.getLogger("ks_ws.live")
@@ -41,7 +41,7 @@ class LiveExecutor:
     def __init__(
         self,
         bus: EventBus,
-        risk: Risk,
+        risk: Risk | EnhancedRisk,
         router: OrderRouter,
         ledger: Ledger | None = None,
     ) -> None:

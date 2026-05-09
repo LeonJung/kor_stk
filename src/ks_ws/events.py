@@ -106,6 +106,18 @@ class SixtyDayLow(Event):
     volume_multiplier: float
 
 
+class CorporateAction(Event):
+    """Corporate action affecting share count or new listing.
+
+    ``action_type`` 예: ``bonus_issue`` (무상증자), ``rights_issue`` (유상증자),
+    ``stock_split``, ``ipo`` (신규 상장), ``ticker_change``. Strategies typically
+    pause / unwind around these events; new-listing strategies use ipo.
+    """
+
+    action_type: str
+    detail: str = ""
+
+
 class TrendShift(Event):
     """Market trend regime has shifted (uptrend ↔ sideways ↔ downtrend) and/or
     rolling strategy expectancy collapsed. Risk consumers should pause new
