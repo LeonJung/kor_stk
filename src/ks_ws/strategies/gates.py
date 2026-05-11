@@ -78,6 +78,62 @@ class TimeWindowGate(Strategy):
         return self.inner.on_event(event) if self.is_active(event.timestamp) else []
 
 
+class EntryWindowGate(Strategy):
+    """Like TimeWindowGate, but only BUY signals are gated by time. SELL
+    signals pass through unconditionally so existing positions can still be
+    closed (TP/SL/timeout/force-close) outside the entry window.
+
+    Use this for any strategy that opens long positions inside a defined
+    entry window but may need to close them outside that window. Examples:
+    - LiveBreakoutStrategy: entry 09:00-14:30, exits via TP/SL/max_hold any time
+    - ClosingBetStrategy: entry 13:30-15:25, exit next-day 09:00-15:25
+    """
+
+    def __init__(
+        self,
+        inner: Strategy,
+        *,
+        windows: list[tuple[time, time]],
+        timezone: str = "Asia/Seoul",
+    ) -> None:
+        from ks_ws.domain import Side  # local import to avoid cycle
+        if not windows:
+            raise ValueError("windows must not be empty")
+        for start, end in windows:
+            if not isinstance(start, time) or not isinstance(end, time):
+                raise TypeError("window endpoints must be datetime.time")
+            if start >= end:
+                raise ValueError(f"window start ({start}) must be < end ({end})")
+        self.inner = inner
+        self.name = inner.name
+        self.windows = windows
+        self.tz = ZoneInfo(timezone)
+        self._buy_side = Side.BUY
+
+    def is_entry_active(self, ts: datetime) -> bool:
+        if ts.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        local = ts.astimezone(self.tz).time()
+        return any(start <= local < end for start, end in self.windows)
+
+    def _filter(self, sigs: list[Signal], ts: datetime) -> list[Signal]:
+        if self.is_entry_active(ts):
+            return sigs
+        return [s for s in sigs if s.side != self._buy_side]
+
+    def on_bar(self, bar: Bar) -> list[Signal]:
+        return self._filter(self.inner.on_bar(bar), bar.timestamp)
+
+    def on_tick(self, tick: Tick) -> list[Signal]:
+        return self._filter(self.inner.on_tick(tick), tick.timestamp)
+
+    def on_orderbook(self, orderbook: OrderBook) -> list[Signal]:
+        return self._filter(self.inner.on_orderbook(orderbook), orderbook.timestamp)
+
+    def on_event(self, event: Event) -> list[Signal]:
+        return self._filter(self.inner.on_event(event), event.timestamp)
+
+
 RegimeProvider = Callable[[], str]
 
 

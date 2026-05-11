@@ -53,7 +53,11 @@ def test_default_rates_match_kis_constraints():
     mock_rl = get_limiter("mock")
     live_rl = get_limiter("live")
     assert mock_rl.rate == 2.0
-    assert live_rl.rate == 20.0
+    # live default = 15 with 25% headroom under KIS official 20 (sliding window)
+    assert live_rl.rate == 15.0
+    # capacity is sliding-window safe (≤ rate × 0.7)
+    assert live_rl.capacity <= int(live_rl.rate)
+    assert mock_rl.capacity <= int(mock_rl.rate * 0.7) or mock_rl.capacity == 1
 
 
 def test_reset_clears_registry():

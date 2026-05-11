@@ -47,3 +47,12 @@ todo.md
 strategy.md
 strategy_book.md
 response_rule.md
+
+# Sensitive credential files (added 2026-05-11)
+win_pc_info.txt
+docs/daishin_windows_setup.md
+daishin_creds.txt
+**/*creds*.txt
+
+# Local IDE / temp
+*.local.json

@@ -9,6 +9,9 @@ KIS 는 호출당 최대 ~100 행 (분봉/일봉) 또는 단일 스냅샷을 반
 
 import logging
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
+
+_KST = ZoneInfo("Asia/Seoul")
 from typing import Literal
 
 from pydantic import BaseModel
@@ -172,7 +175,8 @@ def _parse_minute_response(symbol: str, data: dict) -> list[Bar]:
         time_str = row.get("stck_cntg_hour")
         if not date_str or not time_str:
             continue
-        ts = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+        # KIS returns KST wall-clock time; convert to UTC for storage.
+        ts = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S").replace(tzinfo=_KST).astimezone(UTC)
         bars.append(
             Bar(
                 symbol=symbol,
