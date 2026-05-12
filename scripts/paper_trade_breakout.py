@@ -13,7 +13,7 @@ closing_bet (도지 종가베팅, 책 strategy I) 13:30 이후 추가 가동.
   다음날 첫 tick 에 entry_price 캡처 후 TP/SL 로 자동 청산.
   TP/SL 미도달 시 force-close 안 함 — 사용자 룰: 전략이 청산 조건 미달이면 hold 유지.
 - BreakoutStrategy / ClosingBetStrategy → Signal emit → Allocator → Risk → KisOrderRouter (mock)
-- 장 마감 (15:30) 또는 KeyboardInterrupt 시 종료 + ledger 요약
+- 세션 종료 (20:00 KST, 사용자 명시 2026-05-13) 또는 KeyboardInterrupt 시 ledger 요약
 
 Usage::
 
@@ -199,7 +199,11 @@ async def main() -> int:
     # 각 strategy 가 자기 시간대에서만 BUY entry, SELL (TP/SL/force-close) 는 항상 통과.
     # 이미 시간 넘겼으면 (window 가 과거) 새 entry 0건, 기존 포지션 청산은 정상 진행.
     # 시간 안 됐으면 (window 가 미래) entry signal 무시되며 시간 도래 시 자동 활성.
-    BREAKOUT_WINDOW = (time(9, 0), time(14, 30))
+    # 사용자 명시 2026-05-13: trade 활성 08:00 ~ 20:00 KST. 08:00-09:00 = 정규장
+    # 전 호가 접수 시간, 15:30 = 정규장 마감, 16:00-18:00 = 시간외 단일가, 18:00-20:00 =
+    # 미장 선물 leading. KIS WS frame 은 정규장 (09:00-15:30) 활발, 나머지 시간 대부분
+    # idle (mock 한계).
+    BREAKOUT_WINDOW = (time(8, 0), time(14, 30))
     CLOSING_BET_WINDOW = (time(13, 30), time(15, 25))
 
     strategy = LiveBreakoutStrategy(
@@ -367,16 +371,16 @@ async def main() -> int:
     await runtime.start()
     await executor.start()
 
-    log.info("Live trading started; awaiting market close 15:30 KST...")
+    log.info("Live trading started; awaiting session stop 20:00 KST...")
 
-    # Stop at 15:30 KST today
+    # Stop at 20:00 KST today (사용자 명시 2026-05-13: 시간외 + 미장 선물 leading 시간대까지)
     now_kst = datetime.now(UTC).astimezone(_KST)
-    market_close = now_kst.replace(hour=15, minute=30, second=0, microsecond=0)
+    market_close = now_kst.replace(hour=20, minute=0, second=0, microsecond=0)
     if market_close <= now_kst:
-        log.error("Market already closed for today.")
+        log.error("Session already past 20:00 KST today.")
         return 0
     seconds_left = (market_close - now_kst).total_seconds()
-    log.info("Will run for ~%.0f minutes until 15:30 KST", seconds_left / 60)
+    log.info("Will run for ~%.0f minutes until 20:00 KST", seconds_left / 60)
 
     # Periodic status loop
     # 룰 (사용자 명시 2026-05-11): 전략이 청산 조건 미달 = hold 유지. force-close 안 함.
