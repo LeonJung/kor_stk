@@ -64,6 +64,7 @@ async def main() -> int:
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.rvol import score_from_rvol
+    from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
     from ks_ws.strategies.fundamental_allocator import (
         FundamentalAllocator,
@@ -251,13 +252,23 @@ async def main() -> int:
             if foreign_net != 0
             else 1.0
         )
-        score = blend_macro_scores(r_score, f_score)
+        # Valuation (PER/PBR) — 4th input. KIS inquire-price endpoint 시간 제약 X.
+        try:
+            val = fetch_valuation(sym)
+            v_score = blend_per_pbr_score(val.per, val.pbr) if val else 1.0
+            per_str = f"{val.per:.1f}" if val and val.per is not None else "?"
+            pbr_str = f"{val.pbr:.2f}" if val and val.pbr is not None else "?"
+        except Exception as e:
+            log.warning("  valuation fetch failed for %s: %s", sym, e)
+            v_score = 1.0
+            per_str = pbr_str = "?"
+        score = blend_macro_scores(r_score, f_score, v_score)
         allocator.set_macro_score(sym, score)
         macro_set += 1
         fn_str = f"{foreign_net:+,d}"
         log.info(
-            "  macro %s: RVOL=%.2f(r=%.2f) foreign=%s KRW(f=%.2f) blend=%.2f",
-            sym, rvol, r_score, fn_str, f_score, score,
+            "  macro %s: RVOL=%.2f(r=%.2f) foreign=%s(f=%.2f) PER=%s/PBR=%s(v=%.2f) blend=%.2f",
+            sym, rvol, r_score, fn_str, f_score, per_str, pbr_str, v_score, score,
         )
     log.info("Set macro_score for %d/%d symbols (min_score=0.5 BUY veto)", macro_set, len(codes))
 
