@@ -127,6 +127,22 @@ STRATEGY_SPECS = {
     "vwap_reversion_min":  dict(uni="KOSPI 시총상위 200",         tf="1m",      window="장중 VWAP rolling 30 + ±1.5σ + vol×3"),
     "scalping_min":        dict(uni="KOSDAQ 시총상위 300",        tf="1m",      window="09:00~09:50 +0.5% spike + vol ×3"),
     "pair_follow_min":     dict(uni="KOSDAQ 시총상위 200 페어",   tf="1m+1d",   window="leader 분봉 high ≥ prev×1.30"),
+    # Phase 1 (2026-05-11) — 외부 실증 + 한국 커뮤니티 (일봉)
+    "volatility_breakout": dict(uni="KOSPI+KOSDAQ 시총상위 200",   tf="1d",      window="당일 open + (prev_h-prev_l)×0.5 돌파 (Larry Williams)"),
+    "overnight_reversal":  dict(uni="KOSPI 시총상위 200",          tf="1d",      window="overnight gap ≤ -1% → open 매수, close 청산 (JFE 2022)"),
+    "nr7_breakout":        dict(uni="KOSPI+KOSDAQ 시총상위 300",   tf="1d",      window="7일 중 가장 좁은 range 봉 → 다음날 high+1tick 돌파"),
+    "bnf_disparity":       dict(uni="KOSPI+KOSDAQ 시총상위 300",   tf="1d",      window="종가/25MA 괴리율 ≤ -15% → 다음날 시가 매수 (BNF)"),
+    "dual_thrust":         dict(uni="KOSPI200 시총상위 100",       tf="1d",      window="open + 0.7×range(4d HH-LC/HC-LL) 돌파 long-only"),
+    # Phase 2 (2026-05-12) — 한국 커뮤니티 (분봉)
+    "color_streak_min":    dict(uni="KOSPI+KOSDAQ 시총상위 300",   tf="1m",      window="1분봉 4연속 양봉 → 5번째 매수, ±1% / 3봉 청산"),
+    "pivot_half_min":      dict(uni="KOSPI+KOSDAQ 시총상위 300",   tf="1m",      window="5분봉 +3% 양봉 후 절반 가격 눌림 매수, high/low 청산"),
+    "crash_scalp_min":     dict(uni="KOSDAQ 시총상위 300",         tf="1m",      window="당일 -5% 급락 후 직전 5분 저점 깨고 양봉 반전 매수 (마하세븐)"),
+    # Phase 1 재검증 (2026-05-12) — 일봉 simulator 의 SL-first 가정 limitations 극복
+    "volatility_breakout_min": dict(uni="KOSPI+KOSDAQ 시총상위 200", tf="1d+1m", window="Larry Williams 변동성 돌파 — 분봉 entry timing 정확"),
+    "dual_thrust_min":         dict(uni="KOSPI200 시총상위 100",    tf="1d+1m", window="Dual Thrust 분봉 confirm — entry 분봉, exit 60분 hold"),
+    # Phase 3 (2026-05-12) — 틱 기반 (data/ticks.sqlite 5/11 KIS WS capture)
+    "tape_burst_tick":     dict(uni="5/11 capture top20",           tf="1T",   window="1초 거래대금 > 60s avg×3 + 가격 3-streak uptick → BUY, +0.2/-0.1% / 60s"),
+    "stop_hunt_tick":      dict(uni="5/11 capture top20",           tf="1T",   window="15분 min 을 0.2% wick 후 30초 안 회복 → BUY, +0.3/-0.2% / 5분"),
 }
 
 
@@ -170,6 +186,27 @@ def choose_universe_for_strategy(strategy: str, reg: UniverseRegistry) -> list[U
         return reg.top_by_market_cap(300, market="KOSDAQ")
     if strategy == "pair_follow_min":
         return reg.top_by_market_cap(200, market="KOSDAQ")
+    # Phase 1 (2026-05-11)
+    if strategy == "volatility_breakout":
+        return reg.top_by_market_cap(200)
+    if strategy == "overnight_reversal":
+        return reg.top_by_market_cap(200, market="KOSPI")
+    if strategy == "nr7_breakout":
+        return reg.top_by_market_cap(300)
+    if strategy == "bnf_disparity":
+        return reg.top_by_market_cap(300)
+    if strategy == "dual_thrust":
+        return reg.top_by_market_cap(100, market="KOSPI")
+    if strategy == "color_streak_min":
+        return reg.top_by_market_cap(300)
+    if strategy == "pivot_half_min":
+        return reg.top_by_market_cap(300)
+    if strategy == "crash_scalp_min":
+        return reg.top_by_market_cap(300, market="KOSDAQ")
+    if strategy == "volatility_breakout_min":
+        return reg.top_by_market_cap(200)
+    if strategy == "dual_thrust_min":
+        return reg.top_by_market_cap(100, market="KOSPI")
     return reg.top_by_market_cap(100)
 
 
@@ -414,12 +451,12 @@ def simulate_preferred_pair(reg, bar_store, win_reg: WinningTradesRegistry,
                     pnl = pnl_per_share * qty
                     stats["trades"] += 1
                     stats["total_pnl"] += pnl
+                    win_reg.record("preferred_pair", f"{pref}/{common}",
+                                   d, nd, qty,
+                                   int(pref_by_d[d].close + common_by_d[d].close),
+                                   int(pref_by_d[nd].close + common_by_d[nd].close))
                     if pnl > 0:
                         stats["wins"] += 1
-                        win_reg.record("preferred_pair", f"{pref}/{common}",
-                                       d, nd, qty,
-                                       int(pref_by_d[d].close + common_by_d[d].close),
-                                       int(pref_by_d[nd].close + common_by_d[nd].close))
                     elif pnl < 0:
                         stats["losses"] += 1
                     break
@@ -551,12 +588,12 @@ def simulate_opening_momentum_minute(bars_by_symbol: dict[str, list[Bar]],
         pnl = (exit_price - entry_price) * qty
         stats["trades"] += 1
         stats["total_pnl"] += pnl
+        win_reg.record("opening_momentum_min", symbol,
+                       bars[entered_at].timestamp.date(),
+                       bars[entered_at].timestamp.date(),
+                       qty, entry_price, exit_price)
         if pnl > 0:
             stats["wins"] += 1
-            win_reg.record("opening_momentum_min", symbol,
-                           bars[entered_at].timestamp.date(),
-                           bars[entered_at].timestamp.date(),
-                           qty, entry_price, exit_price)
         elif pnl < 0:
             stats["losses"] += 1
     return stats
@@ -602,11 +639,14 @@ def simulate_vwap_reversion_minute(bars_by_symbol: dict[str, list[Bar]],
                     pnl = (b.close - entry_price) * qty
                     stats["trades"] += 1
                     stats["total_pnl"] += pnl
+                    # BUG fix (2026-05-12): TP / SL 둘 다 항상 record. 이전엔
+                    # SL 분기 가 record 안 해서 win_reg 에 win 만 들어가 100%
+                    # win 처럼 보였음.
+                    win_reg.record("vwap_reversion_min", symbol,
+                                   bars[entry_idx].timestamp.date(),
+                                   b.timestamp.date(), qty, entry_price, b.close)
                     if pnl > 0:
                         stats["wins"] += 1
-                        win_reg.record("vwap_reversion_min", symbol,
-                                       bars[entry_idx].timestamp.date(),
-                                       b.timestamp.date(), qty, entry_price, b.close)
                     elif pnl < 0:
                         stats["losses"] += 1
                     in_pos = False
@@ -617,7 +657,12 @@ def simulate_vwap_reversion_minute(bars_by_symbol: dict[str, list[Bar]],
                         pnl = (b.close - entry_price) * qty
                         stats["trades"] += 1
                         stats["total_pnl"] += pnl
-                        if pnl < 0:
+                        win_reg.record("vwap_reversion_min", symbol,
+                                       bars[entry_idx].timestamp.date(),
+                                       b.timestamp.date(), qty, entry_price, b.close)
+                        if pnl > 0:
+                            stats["wins"] += 1
+                        elif pnl < 0:
                             stats["losses"] += 1
                         in_pos = False
             else:
@@ -737,6 +782,668 @@ def simulate_pair_follow_minute(reg, bar_store, win_reg: WinningTradesRegistry,
 
 
 # ============================================================================
+# Phase 1 — 외부 실증 + 한국 커뮤니티 strategy (일봉 기반, 2026-05-11 추가)
+# ============================================================================
+
+
+def simulate_volatility_breakout(bars_by_symbol: dict[str, list[Bar]], win_reg: WinningTradesRegistry,
+                                  k: float = 0.5, take_profit_pct: float = 3.0,
+                                  stop_loss_pct: float = 2.0) -> dict:
+    """Larry Williams 변동성 돌파. target = 당일 open + (prev_h - prev_l) × K.
+    intraday 가 target 도달 시 entry, 다음날 시가 청산. K=0.5 default."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in bars_by_symbol.items():
+        if len(bars) < 3:
+            continue
+        for i in range(1, len(bars) - 1):
+            prev = bars[i - 1]
+            cur = bars[i]
+            if cur.open <= 0:
+                continue
+            target = cur.open + (prev.high - prev.low) * k
+            if cur.high < target:
+                continue
+            entry = int(target)
+            tp = entry * (1 + take_profit_pct / 100)
+            sl = entry * (1 - stop_loss_pct / 100)
+            if cur.low <= sl:
+                exit_price = int(sl)
+            elif cur.high >= tp:
+                exit_price = int(tp)
+            else:
+                exit_price = bars[i + 1].open  # 다음날 시가
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("volatility_breakout", symbol, cur.timestamp.date(),
+                           bars[i + 1].timestamp.date(), qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+def simulate_overnight_reversal(bars_by_symbol: dict[str, list[Bar]], win_reg: WinningTradesRegistry,
+                                  gap_threshold_pct: float = -1.0,
+                                  take_profit_pct: float = 2.0, stop_loss_pct: float = 2.0) -> dict:
+    """Korean Overnight-Daytime Reversal. overnight gap (prev_close → today_open)
+    이 -1% 이하면 today_open 매수 → today_close 청산 (long-only). 학술 (JFE 2022)."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in bars_by_symbol.items():
+        if len(bars) < 2:
+            continue
+        for i in range(1, len(bars)):
+            prev = bars[i - 1]
+            cur = bars[i]
+            if prev.close <= 0:
+                continue
+            overnight = (cur.open - prev.close) / prev.close * 100
+            if overnight > gap_threshold_pct:
+                continue
+            entry = cur.open
+            tp = entry * (1 + take_profit_pct / 100)
+            sl = entry * (1 - stop_loss_pct / 100)
+            if cur.low <= sl:
+                exit_price = int(sl)
+            elif cur.high >= tp:
+                exit_price = int(tp)
+            else:
+                exit_price = cur.close
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("overnight_reversal", symbol, cur.timestamp.date(),
+                           cur.timestamp.date(), qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+def simulate_nr7_breakout(bars_by_symbol: dict[str, list[Bar]], win_reg: WinningTradesRegistry,
+                          n: int = 7, take_profit_pct: float = 3.0,
+                          stop_loss_pct: float = 2.0) -> dict:
+    """NR7 (Crabel). 최근 N=7일 중 오늘이 가장 좁은 range 면 다음날 high+1tick
+    돌파 시 매수, 손절 = NR 봉의 low, 익절 +3% / 종가 청산."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in bars_by_symbol.items():
+        if len(bars) < n + 1:
+            continue
+        for i in range(n - 1, len(bars) - 1):
+            window = bars[i - n + 1 : i + 1]
+            cur = bars[i]
+            ranges = [b.high - b.low for b in window]
+            if ranges and min(ranges) != (cur.high - cur.low):
+                continue
+            nb = bars[i + 1]
+            entry_trigger = cur.high + 1
+            if nb.high < entry_trigger:
+                continue
+            entry = int(entry_trigger)
+            tp = entry * (1 + take_profit_pct / 100)
+            sl = max(cur.low, entry * (1 - stop_loss_pct / 100))
+            if nb.low <= sl:
+                exit_price = int(sl)
+            elif nb.high >= tp:
+                exit_price = int(tp)
+            else:
+                exit_price = nb.close
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("nr7_breakout", symbol, cur.timestamp.date(),
+                           nb.timestamp.date(), qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+def simulate_bnf_disparity(bars_by_symbol: dict[str, list[Bar]], win_reg: WinningTradesRegistry,
+                            ma_period: int = 25, disparity_threshold: float = -15.0,
+                            take_profit_pct: float = 5.0, stop_loss_pct: float = 3.0) -> dict:
+    """BNF (Kotegawa) 25일선 괴리율 역추세. 종가가 25일 MA 대비 -15% 이하
+    (oversold) → 다음날 시초가 매수, MA 회귀 / +5% 익절 / -3% 손절."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in bars_by_symbol.items():
+        if len(bars) < ma_period + 1:
+            continue
+        for i in range(ma_period, len(bars) - 1):
+            window_close = [b.close for b in bars[i - ma_period + 1 : i + 1]]
+            ma = sum(window_close) / ma_period
+            cur = bars[i]
+            if ma <= 0:
+                continue
+            disparity = (cur.close - ma) / ma * 100
+            if disparity > disparity_threshold:
+                continue
+            nb = bars[i + 1]
+            entry = nb.open
+            tp = entry * (1 + take_profit_pct / 100)
+            sl = entry * (1 - stop_loss_pct / 100)
+            if nb.low <= sl:
+                exit_price = int(sl)
+            elif nb.high >= tp:
+                exit_price = int(tp)
+            else:
+                exit_price = nb.close
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("bnf_disparity", symbol, cur.timestamp.date(),
+                           nb.timestamp.date(), qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+def simulate_dual_thrust(bars_by_symbol: dict[str, list[Bar]], win_reg: WinningTradesRegistry,
+                         n: int = 4, k1: float = 0.7,
+                         take_profit_pct: float = 3.0, stop_loss_pct: float = 2.0) -> dict:
+    """Dual Thrust (Chalek). range = max(HH-LC, HC-LL) over N=4.
+    target_long = today_open + K1×range. 장중 high ≥ target_long 시 매수,
+    일봉 종가 청산. Long-only 변형."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in bars_by_symbol.items():
+        if len(bars) < n + 1:
+            continue
+        for i in range(n, len(bars)):
+            window = bars[i - n : i]
+            hh = max(b.high for b in window)
+            lc = min(b.close for b in window)
+            hc = max(b.close for b in window)
+            ll = min(b.low for b in window)
+            rng = max(hh - lc, hc - ll)
+            cur = bars[i]
+            if cur.open <= 0 or rng <= 0:
+                continue
+            target = cur.open + k1 * rng
+            if cur.high < target:
+                continue
+            entry = int(target)
+            tp = entry * (1 + take_profit_pct / 100)
+            sl = entry * (1 - stop_loss_pct / 100)
+            if cur.low <= sl:
+                exit_price = int(sl)
+            elif cur.high >= tp:
+                exit_price = int(tp)
+            else:
+                exit_price = cur.close
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("dual_thrust", symbol, cur.timestamp.date(),
+                           cur.timestamp.date(), qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+# ============================================================================
+# Phase 3 — 틱(tick) 기반 strategy (2026-05-12 추가)
+# 데이터: data/ticks.sqlite (KIS WS H0STCNT0 캡처, 초 단위 timestamp)
+# ============================================================================
+
+
+def _load_tick_buckets_per_second(conn, day_filter: str = None):
+    """1초 단위 bucket: {symbol: [(ts_iso_sec, last_price, value_krw), ...]}"""
+    import sqlite3 as _sq
+    from collections import defaultdict
+    where = f"WHERE substr(ts_iso, 1, 10) = '{day_filter}'" if day_filter else ""
+    cur = conn.execute(f"""
+        SELECT symbol, substr(ts_iso, 1, 19) AS sec_iso,
+               SUM(price * volume) AS value,
+               MAX(price) AS hi, MIN(price) AS lo
+        FROM ticks {where}
+        GROUP BY symbol, sec_iso
+        ORDER BY symbol, sec_iso
+    """)
+    by_sym: dict = defaultdict(list)
+    last_seen: dict = {}
+    for sym, sec_iso, value, hi, lo in cur:
+        # Last price ≈ last price in that second
+        # SQLite 가 첫 row 별 last_price 별도 query 비싸 → MAX(price) 로 근사 (uptick 신호 위주이라 OK)
+        by_sym[sym].append((sec_iso, hi, value, lo))
+    return dict(by_sym)
+
+
+def simulate_tape_burst_tick(tick_db_path: str, win_reg: WinningTradesRegistry,
+                              multiplier: float = 3.0, streak: int = 3,
+                              tp_pct: float = 0.2, sl_pct: float = 0.1,
+                              max_hold_sec: int = 60) -> dict:
+    """Tape-Reading Volume Burst. 1초 거래대금이 직전 60초 EMA × N 초과 AND
+    가격 streak ≥ N uptick → 매수. +0.2% / -0.1% / 60sec 청산."""
+    import sqlite3 as _sq
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    conn = _sq.connect(tick_db_path)
+    try:
+        sym_buckets = _load_tick_buckets_per_second(conn)
+        for sym, secs in sym_buckets.items():
+            if len(secs) < 70:
+                continue
+            for i in range(60, len(secs) - max_hold_sec - 1):
+                window = secs[i - 60 : i]
+                avg_value = sum(d[2] for d in window) / 60
+                if avg_value <= 0:
+                    continue
+                cur = secs[i]
+                if cur[2] < avg_value * multiplier:
+                    continue
+                # uptick streak
+                recent = secs[max(0, i - streak) : i]
+                if len(recent) < streak:
+                    continue
+                uptick = all(recent[j][1] > recent[j - 1][1] for j in range(1, len(recent)))
+                if not uptick:
+                    continue
+                if i + 1 >= len(secs):
+                    continue
+                entry = secs[i + 1][1]
+                if entry <= 0:
+                    continue
+                tp = entry * (1 + tp_pct / 100)
+                sl = entry * (1 - sl_pct / 100)
+                future = secs[i + 1 : i + 1 + max_hold_sec]
+                exit_price = future[-1][1] if future else entry
+                for f in future:
+                    if f[3] <= sl:  # f[3] = lo (1초 안 가격 low)
+                        exit_price = int(sl)
+                        break
+                    if f[1] >= tp:  # f[1] = hi
+                        exit_price = int(tp)
+                        break
+                qty = 10
+                pnl = (exit_price - entry) * qty
+                stats["trades"] += 1
+                stats["total_pnl"] += pnl
+                from datetime import datetime
+                d = datetime.fromisoformat(cur[0]).date()
+                win_reg.record("tape_burst_tick", sym, d, d, qty, entry, exit_price)
+                if pnl > 0:
+                    stats["wins"] += 1
+                elif pnl < 0:
+                    stats["losses"] += 1
+    finally:
+        conn.close()
+    return stats
+
+
+def simulate_stop_hunt_tick(tick_db_path: str, win_reg: WinningTradesRegistry,
+                             lookback_sec: int = 900, wick_pct: float = 0.2,
+                             recovery_sec: int = 30, tp_pct: float = 0.3,
+                             sl_pct: float = 0.2, max_hold_sec: int = 300) -> dict:
+    """Stop-Hunt Reversion. 직전 lookback_sec 동안의 min 을 wick_pct% 깬 후
+    recovery_sec 안에 그 min 위로 회복 → long. ATR×1 TP / wick 갱신 SL."""
+    import sqlite3 as _sq
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    conn = _sq.connect(tick_db_path)
+    try:
+        sym_buckets = _load_tick_buckets_per_second(conn)
+        for sym, secs in sym_buckets.items():
+            if len(secs) < lookback_sec + max_hold_sec + 1:
+                continue
+            i = lookback_sec
+            while i < len(secs) - max_hold_sec - 1:
+                # rolling min over lookback_sec
+                window = secs[i - lookback_sec : i]
+                roll_min = min(d[3] for d in window if d[3] > 0)
+                if roll_min <= 0:
+                    i += 1
+                    continue
+                cur = secs[i]
+                # wick: cur low broke roll_min by wick_pct%
+                if cur[3] >= roll_min * (1 - wick_pct / 100):
+                    i += 1
+                    continue
+                # recovery check
+                recovery_window = secs[i + 1 : i + 1 + recovery_sec]
+                recovered = False
+                recovery_idx = None
+                for j, r in enumerate(recovery_window):
+                    if r[1] > roll_min:  # recovered above roll_min
+                        recovered = True
+                        recovery_idx = j
+                        break
+                if not recovered:
+                    i += 1
+                    continue
+                entry = recovery_window[recovery_idx][1]
+                if entry <= 0:
+                    i += 1
+                    continue
+                tp = entry * (1 + tp_pct / 100)
+                sl = min(cur[3], entry * (1 - sl_pct / 100))
+                start_idx = i + 1 + recovery_idx + 1
+                future = secs[start_idx : start_idx + max_hold_sec]
+                exit_price = future[-1][1] if future else entry
+                for f in future:
+                    if f[3] <= sl:
+                        exit_price = int(sl)
+                        break
+                    if f[1] >= tp:
+                        exit_price = int(tp)
+                        break
+                qty = 10
+                pnl = (exit_price - entry) * qty
+                stats["trades"] += 1
+                stats["total_pnl"] += pnl
+                from datetime import datetime
+                d = datetime.fromisoformat(cur[0]).date()
+                win_reg.record("stop_hunt_tick", sym, d, d, qty, entry, exit_price)
+                if pnl > 0:
+                    stats["wins"] += 1
+                elif pnl < 0:
+                    stats["losses"] += 1
+                i = start_idx + max_hold_sec  # cooldown
+            # end while
+    finally:
+        conn.close()
+    return stats
+
+
+# ============================================================================
+# Phase 1 재검증 — 일봉 strategy 를 분봉으로 정확히 (2026-05-12 추가)
+# ============================================================================
+
+
+def simulate_volatility_breakout_min(daily_bars: dict[str, list[Bar]],
+                                      min_bars: dict[str, list[Bar]],
+                                      win_reg: WinningTradesRegistry,
+                                      k: float = 0.5, take_profit_pct: float = 3.0,
+                                      stop_loss_pct: float = 2.0) -> dict:
+    """Larry Williams 변동성 돌파 — 분봉으로 entry timing 정확. target =
+    today_open + (prev_h - prev_l) × K. 당일 분봉 중 target 첫 도달 분봉에서
+    entry, 이후 분봉으로 TP/SL hit 추적."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    from collections import defaultdict
+    for symbol, dbars in daily_bars.items():
+        if len(dbars) < 2:
+            continue
+        mbars = min_bars.get(symbol, [])
+        if not mbars:
+            continue
+        # group min bars by date
+        by_day: dict = defaultdict(list)
+        for b in mbars:
+            by_day[b.timestamp.date()].append(b)
+        for i in range(1, len(dbars)):
+            prev_d = dbars[i - 1]
+            cur_d = dbars[i]
+            today_min = by_day.get(cur_d.timestamp.date(), [])
+            if not today_min:
+                continue
+            today_open = today_min[0].open
+            if today_open <= 0:
+                continue
+            target = today_open + (prev_d.high - prev_d.low) * k
+            # find first bar hitting target
+            entry_idx = None
+            for j, mb in enumerate(today_min):
+                if mb.high >= target:
+                    entry_idx = j
+                    break
+            if entry_idx is None:
+                continue
+            entry = int(target)
+            future = today_min[entry_idx : entry_idx + 60]  # within day
+            tp_pct = take_profit_pct
+            sl_pct = stop_loss_pct
+            exit_price, _r, exit_idx = _conservative_exit(entry, future, tp_pct, sl_pct, len(future))
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("volatility_breakout_min", symbol,
+                           cur_d.timestamp.date(), cur_d.timestamp.date(),
+                           qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+def simulate_dual_thrust_min(daily_bars: dict[str, list[Bar]],
+                              min_bars: dict[str, list[Bar]],
+                              win_reg: WinningTradesRegistry,
+                              n: int = 4, k1: float = 0.7,
+                              take_profit_pct: float = 3.0, stop_loss_pct: float = 2.0) -> dict:
+    """Dual Thrust 분봉 confirm. range = max(HH-LC, HC-LL) over N=4 일봉.
+    target_long = today_open + K1×range. 당일 분봉 첫 도달 시 entry."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    from collections import defaultdict
+    for symbol, dbars in daily_bars.items():
+        if len(dbars) < n + 1:
+            continue
+        mbars = min_bars.get(symbol, [])
+        if not mbars:
+            continue
+        by_day: dict = defaultdict(list)
+        for b in mbars:
+            by_day[b.timestamp.date()].append(b)
+        for i in range(n, len(dbars)):
+            window = dbars[i - n : i]
+            hh = max(b.high for b in window)
+            lc = min(b.close for b in window)
+            hc = max(b.close for b in window)
+            ll = min(b.low for b in window)
+            rng = max(hh - lc, hc - ll)
+            cur_d = dbars[i]
+            today_min = by_day.get(cur_d.timestamp.date(), [])
+            if not today_min or rng <= 0:
+                continue
+            today_open = today_min[0].open
+            target = today_open + k1 * rng
+            entry_idx = None
+            for j, mb in enumerate(today_min):
+                if mb.high >= target:
+                    entry_idx = j
+                    break
+            if entry_idx is None:
+                continue
+            entry = int(target)
+            future = today_min[entry_idx : entry_idx + 60]
+            exit_price, _r, _ = _conservative_exit(entry, future, take_profit_pct, stop_loss_pct, len(future))
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("dual_thrust_min", symbol,
+                           cur_d.timestamp.date(), cur_d.timestamp.date(),
+                           qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+# ============================================================================
+# Phase 2 — 한국 커뮤니티 strategy (분봉 기반, 2026-05-12 추가)
+# ============================================================================
+
+
+def simulate_color_streak_min(min_bars_by_symbol: dict[str, list[Bar]],
+                                win_reg: WinningTradesRegistry,
+                                streak: int = 4,
+                                take_profit_pct: float = 1.0,
+                                stop_loss_pct: float = 1.0,
+                                hold_bars: int = 3) -> dict:
+    """1분봉 연속 동색봉 모멘텀 (한국 단타 단순 룰). N=4 양봉 연속 후
+    5번째 봉 open 매수 → hold_bars 내 ±1% 도달 또는 hold_bars 종료 시 청산."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in min_bars_by_symbol.items():
+        if len(bars) < streak + hold_bars + 1:
+            continue
+        i = streak
+        while i < len(bars) - hold_bars - 1:
+            recent = bars[i - streak : i]
+            # All bullish
+            if not all(b.close > b.open for b in recent):
+                i += 1
+                continue
+            entry_bar = bars[i]
+            if entry_bar.open <= 0:
+                i += 1
+                continue
+            entry = entry_bar.open
+            tp = entry * (1 + take_profit_pct / 100)
+            sl = entry * (1 - stop_loss_pct / 100)
+            future = bars[i : i + hold_bars + 1]
+            exit_price, _reason, exit_idx = _conservative_exit(entry, future, take_profit_pct, stop_loss_pct, hold_bars)
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            win_reg.record("color_streak_min", symbol, entry_bar.timestamp.date(),
+                           future[min(exit_idx, len(future) - 1)].timestamp.date(),
+                           qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+            i += streak + hold_bars  # avoid overlapping signals
+    return stats
+
+
+def simulate_pivot_half_pullback_min(min_bars_by_symbol: dict[str, list[Bar]],
+                                       win_reg: WinningTradesRegistry,
+                                       pivot_pct: float = 3.0,
+                                       take_profit_pct: float = 2.0,
+                                       stop_loss_pct: float = 1.5,
+                                       hold_bars: int = 30) -> dict:
+    """기준봉(5분봉) 절반 눌림목. 5분봉 +pivot_pct% 양봉 발견 → 후속 분봉에서
+    기준봉의 절반 가격까지 눌림 → 매수. 기준봉 high 돌파 시 익절,
+    low 이탈 시 손절. (1분봉 데이터로 5분봉 합성)"""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in min_bars_by_symbol.items():
+        if len(bars) < 60:
+            continue
+        # 5분봉 합성 — 5개 1분봉 → 하나의 5분봉
+        five_bars: list[tuple[int, Bar]] = []  # (index_of_last_1m_bar, synthesized_5m_bar)
+        for k in range(0, len(bars) - 4, 5):
+            chunk = bars[k : k + 5]
+            if len(chunk) < 5:
+                continue
+            five = Bar(
+                symbol=symbol,
+                timestamp=chunk[-1].timestamp,
+                timeframe="5m",
+                open=chunk[0].open,
+                high=max(b.high for b in chunk),
+                low=min(b.low for b in chunk),
+                close=chunk[-1].close,
+                volume=sum(b.volume for b in chunk),
+                value=sum(b.value for b in chunk),
+            )
+            five_bars.append((k + 4, five))
+
+        for idx, (last_1m_idx, fb) in enumerate(five_bars):
+            if fb.open <= 0:
+                continue
+            up_pct = (fb.close - fb.open) / fb.open * 100
+            if up_pct < pivot_pct:
+                continue
+            half_price = (fb.high + fb.low) / 2
+            # 다음 1분봉들에서 절반 가격 hit 찾기 (최대 30분)
+            entry_window = bars[last_1m_idx + 1 : last_1m_idx + 1 + 30]
+            entry_idx = None
+            for j, ab in enumerate(entry_window):
+                if ab.low <= half_price:
+                    entry_idx = j
+                    break
+            if entry_idx is None:
+                continue
+            entry = int(half_price)
+            tp = max(fb.high, entry * (1 + take_profit_pct / 100))
+            sl = min(fb.low, entry * (1 - stop_loss_pct / 100))
+            tp_pct_eff = (tp - entry) / entry * 100
+            sl_pct_eff = (entry - sl) / entry * 100
+            future = entry_window[entry_idx : entry_idx + hold_bars]
+            exit_price, _reason, exit_idx_in = _conservative_exit(entry, future, tp_pct_eff, sl_pct_eff, hold_bars)
+            qty = 10
+            pnl = (exit_price - entry) * qty
+            stats["trades"] += 1
+            stats["total_pnl"] += pnl
+            cur_date = entry_window[entry_idx].timestamp.date()
+            win_reg.record("pivot_half_min", symbol, cur_date, cur_date,
+                           qty, entry, exit_price)
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+    return stats
+
+
+def simulate_crash_scalp_min(min_bars_by_symbol: dict[str, list[Bar]],
+                              win_reg: WinningTradesRegistry,
+                              drop_pct: float = 5.0,
+                              take_profit_pct: float = 1.5,
+                              stop_loss_pct: float = 1.0,
+                              hold_bars: int = 15) -> dict:
+    """마하세븐 급락주 스캘핑 (단순 버전). 당일 -drop_pct% 이상 급락 종목의
+    분봉에서 직전 5분 최저점 깬 후 양봉 반전 시 매수, +1.5%/−1% / hold_bars 청산.
+    호가/잔량은 V1 에서 가격만으로 근사."""
+    stats = dict(trades=0, wins=0, losses=0, total_pnl=0.0)
+    for symbol, bars in min_bars_by_symbol.items():
+        if len(bars) < 10:
+            continue
+        # group by day
+        from collections import defaultdict
+        by_day: dict = defaultdict(list)
+        for b in bars:
+            by_day[b.timestamp.date()].append(b)
+        for day, day_bars in by_day.items():
+            if len(day_bars) < 20:
+                continue
+            day_open = day_bars[0].open
+            if day_open <= 0:
+                continue
+            # find first bar where price drops -drop_pct%
+            drop_trigger_idx = None
+            for j, b in enumerate(day_bars):
+                if (b.low - day_open) / day_open * 100 <= -drop_pct:
+                    drop_trigger_idx = j
+                    break
+            if drop_trigger_idx is None or drop_trigger_idx >= len(day_bars) - hold_bars - 1:
+                continue
+            # 반전 신호: 직전 5분 minimum 깬 후 양봉
+            for k in range(drop_trigger_idx + 1, min(len(day_bars) - hold_bars - 1, drop_trigger_idx + 20)):
+                prev5 = day_bars[max(0, k - 5) : k]
+                if not prev5:
+                    continue
+                prev_min = min(b.low for b in prev5)
+                cur = day_bars[k]
+                if cur.low < prev_min and cur.close > cur.open:
+                    entry = cur.close
+                    future = day_bars[k + 1 : k + 1 + hold_bars]
+                    exit_price, _reason, exit_idx = _conservative_exit(entry, future, take_profit_pct, stop_loss_pct, hold_bars)
+                    qty = 10
+                    pnl = (exit_price - entry) * qty
+                    stats["trades"] += 1
+                    stats["total_pnl"] += pnl
+                    win_reg.record("crash_scalp_min", symbol, day, day, qty, entry, exit_price)
+                    if pnl > 0:
+                        stats["wins"] += 1
+                    elif pnl < 0:
+                        stats["losses"] += 1
+                    break  # one trade per day
+    return stats
+
+
+# ============================================================================
 # Original opening_momentum (lookahead bias 일봉 기반) — disabled
 # ============================================================================
 
@@ -810,6 +1517,12 @@ def main() -> int:
                             "vwap_reversion_min",    # F VWAP 회귀 (단타)
                             "scalping_min",          # E 스캘핑 09:00-09:50
                             "pair_follow_min",       # A 짝꿍 (스캘핑) 분봉
+                            # Phase 1 (2026-05-11) 외부 실증 + 한국 커뮤니티 (일봉)
+                            "volatility_breakout",   # Larry Williams 변동성 돌파
+                            "overnight_reversal",    # JFE 2022 학술
+                            "nr7_breakout",          # Crabel NR7
+                            "bnf_disparity",         # BNF 25일선 괴리율
+                            "dual_thrust",           # Chalek
                         ],
                         help="strategies to simulate (분봉 V3 + 일봉 V2)")
     args = parser.parse_args()
@@ -866,6 +1579,35 @@ def main() -> int:
             stats = simulate_scalping_minute(min_bars_by_symbol, win_reg)
         elif strategy == "pair_follow_min":
             stats = simulate_pair_follow_minute(reg, bar_store, win_reg, start, end)
+        elif strategy == "volatility_breakout":
+            stats = simulate_volatility_breakout(bars_by_symbol, win_reg)
+        elif strategy == "overnight_reversal":
+            stats = simulate_overnight_reversal(bars_by_symbol, win_reg)
+        elif strategy == "nr7_breakout":
+            stats = simulate_nr7_breakout(bars_by_symbol, win_reg)
+        elif strategy == "bnf_disparity":
+            stats = simulate_bnf_disparity(bars_by_symbol, win_reg)
+        elif strategy == "dual_thrust":
+            stats = simulate_dual_thrust(bars_by_symbol, win_reg)
+        elif strategy == "color_streak_min":
+            min_bars_by_symbol = load_bars(bar_store, codes, start, end, timeframe="1m")
+            stats = simulate_color_streak_min(min_bars_by_symbol, win_reg)
+        elif strategy == "pivot_half_min":
+            min_bars_by_symbol = load_bars(bar_store, codes, start, end, timeframe="1m")
+            stats = simulate_pivot_half_pullback_min(min_bars_by_symbol, win_reg)
+        elif strategy == "crash_scalp_min":
+            min_bars_by_symbol = load_bars(bar_store, codes, start, end, timeframe="1m")
+            stats = simulate_crash_scalp_min(min_bars_by_symbol, win_reg)
+        elif strategy == "volatility_breakout_min":
+            min_bars_by_symbol = load_bars(bar_store, codes, start, end, timeframe="1m")
+            stats = simulate_volatility_breakout_min(bars_by_symbol, min_bars_by_symbol, win_reg)
+        elif strategy == "dual_thrust_min":
+            min_bars_by_symbol = load_bars(bar_store, codes, start, end, timeframe="1m")
+            stats = simulate_dual_thrust_min(bars_by_symbol, min_bars_by_symbol, win_reg)
+        elif strategy == "tape_burst_tick":
+            stats = simulate_tape_burst_tick("data/ticks.sqlite", win_reg)
+        elif strategy == "stop_hunt_tick":
+            stats = simulate_stop_hunt_tick("data/ticks.sqlite", win_reg)
         else:
             print(f"  (no V1 simulator implemented for {strategy})")
             continue

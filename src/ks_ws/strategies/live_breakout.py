@@ -1,8 +1,16 @@
 """LiveBreakoutStrategy — 60일 신고가 돌파 + 거래량 ↑ → BUY (live 버전).
 
 Backtest V2 의 'breakout' simulator (81% win, +6.76M / 60일 lookback) 의
-라이브 적용. 분봉 close 가 60-day daily close 의 max 를 돌파 + 직전 5
-분봉 평균 거래량의 1.5× 면 BUY 진입. 이후 +tp / -sl 도달 시 SELL.
+라이브 적용. 분봉 close 가 60-day daily close 의 max 를 **신규 돌파**
++ 직전 tick window 거래량의 1.5배면 BUY 1회 진입. 이후 +tp / -sl 도달 시 SELL.
+
+진짜 돌파매매 (책 = 만쥬/원정연 Section 10) 사상 반영:
+- **edge detection**: 가격이 60일 high 를 *아래에서 위로 cross* 하는 순간만 trigger.
+  단순 above-high 가 아니라 prev_above → curr_above 의 false→true 전이.
+- **same-day single entry**: 동일 종목·동일 일자에 1회 진입만 허용.
+  TP/SL/timeout 청산 후에도 같은 날 재진입 X. (다음 거래일은 다시 가능)
+- 위 두 가드가 추가되기 전엔 가격이 high 위에 머무는 동안 sell-rebuy
+  churn (사팔사팔) 이 발생했음 → 5/12 paper trade 에서 009150 13B/6S 등.
 
 Per-symbol state:
 - high60: 60일 일봉 close 의 max (외부 주입, 매일 1회 update)
@@ -10,7 +18,7 @@ Per-symbol state:
 - entry_time: 진입 시각
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ks_ws.domain import Side, Signal, Tick
@@ -46,9 +54,12 @@ class LiveBreakoutStrategy(Strategy):
         self.confidence = confidence
         self._open: dict[str, _Pos] = {}
         self._recent_ticks: dict[str, list[Tick]] = {}
+        # edge detection: was previous tick above high60?
+        self._was_above: dict[str, bool] = {}
+        # same-day single entry guard: (symbol, date) already-entered set
+        self._entered_today: set[tuple[str, object]] = set()
 
     def on_tick(self, tick: Tick) -> list[Signal]:
-        # Track recent ticks per symbol (cap last 50)
         recents = self._recent_ticks.setdefault(tick.symbol, [])
         recents.append(tick)
         if len(recents) > 50:
@@ -67,25 +78,41 @@ class LiveBreakoutStrategy(Strategy):
                                   note=f"SL @ {tick.price}")]
             if tick.timestamp - pos.entry_time >= self.max_hold:
                 del self._open[tick.symbol]
-                return [self._sig(tick, Side.SELL, note=f"hold timeout")]
+                return [self._sig(tick, Side.SELL, note="hold timeout")]
             return []
 
-        # Entry: tick price > high60 + tick volume spike
         h60 = self.high60.get(tick.symbol)
-        if h60 is None or tick.price <= h60:
+        if h60 is None:
             return []
-        # Simple volume confirmation: avg of last 20 tick volumes × 1.5
+
+        is_above = tick.price > h60
+        was_above = self._was_above.get(tick.symbol, False)
+        self._was_above[tick.symbol] = is_above
+
+        # B: edge detection — only the false→true cross qualifies.
+        if not is_above or was_above:
+            return []
+
+        # A: same-day single entry — block re-entry on the same KST date.
+        # tick.timestamp.date() — caller is responsible for using KST tz if relevant;
+        # for cross-day boundary semantics the date in tick's own tz is sufficient.
+        day_key = (tick.symbol, tick.timestamp.date())
+        if day_key in self._entered_today:
+            return []
+
         if len(recents) < 20:
             return []
         avg_vol = sum(t.volume for t in recents[-21:-1]) / 20
         if avg_vol > 0 and tick.volume < avg_vol * 1.5:
             return []
+
         self._open[tick.symbol] = _Pos(entry=tick.price, entry_time=tick.timestamp)
+        self._entered_today.add(day_key)
         return [
             Signal(
                 symbol=tick.symbol, side=Side.BUY, confidence=self.confidence,
                 strategy=self.name, timestamp=tick.timestamp,
-                note=f"breakout: {tick.price} > 60d high {h60} + vol×{tick.volume/avg_vol:.1f}",
+                note=f"breakout: {tick.price} > 60d high {h60} + vol*{tick.volume/avg_vol:.1f}",
             )
         ]
 

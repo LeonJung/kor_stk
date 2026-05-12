@@ -50,6 +50,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 _KST = ZoneInfo("Asia/Seoul")
 
+# SAFETY GUARD: 호가 (orderbook) capture cutoff. 사용자 명시 (2026-05-12):
+# 5/12 + 5/13 이틀만 호가 누적, 그 이후 자동 skip. 더 누적하려면 이 값 수정.
+_ORDERBOOK_CAPTURE_END_KST = date(2026, 5, 13)
+
 _TICK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +64,23 @@ CREATE TABLE IF NOT EXISTS ticks (
     aggressor TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ticks_symbol_ts ON ticks(symbol, ts_iso);
+
+CREATE TABLE IF NOT EXISTS orderbook (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    ts_iso TEXT NOT NULL,
+    ask_px_1 INTEGER, ask_qty_1 INTEGER,
+    ask_px_2 INTEGER, ask_qty_2 INTEGER,
+    ask_px_3 INTEGER, ask_qty_3 INTEGER,
+    ask_px_4 INTEGER, ask_qty_4 INTEGER,
+    ask_px_5 INTEGER, ask_qty_5 INTEGER,
+    bid_px_1 INTEGER, bid_qty_1 INTEGER,
+    bid_px_2 INTEGER, bid_qty_2 INTEGER,
+    bid_px_3 INTEGER, bid_qty_3 INTEGER,
+    bid_px_4 INTEGER, bid_qty_4 INTEGER,
+    bid_px_5 INTEGER, bid_qty_5 INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ob_symbol_ts ON orderbook(symbol, ts_iso);
 """
 
 
@@ -88,49 +109,92 @@ async def capture_session(symbols: list[str], conn: sqlite3.Connection,
     from ks_ws.kis.realtime import KisRealtimeFeed
 
     settings = get_settings()
-    count = 0
-    insert_sql = (
+    tick_count = 0
+    ob_count = 0
+    _ob_cutoff_warned = False
+    insert_tick = (
         "INSERT INTO ticks (symbol, ts_iso, price, volume, aggressor) "
         "VALUES (?, ?, ?, ?, ?)"
+    )
+    insert_ob = (
+        "INSERT INTO orderbook (symbol, ts_iso, "
+        "ask_px_1, ask_qty_1, ask_px_2, ask_qty_2, ask_px_3, ask_qty_3, "
+        "ask_px_4, ask_qty_4, ask_px_5, ask_qty_5, "
+        "bid_px_1, bid_qty_1, bid_px_2, bid_qty_2, bid_px_3, bid_qty_3, "
+        "bid_px_4, bid_qty_4, bid_px_5, bid_qty_5"
+        ") VALUES (?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?)"
     )
     today = kst_now().date().isoformat()
     async with KisRealtimeFeed(settings) as feed:
         for sym in symbols:
             await feed.subscribe("H0STCNT0", sym)
+            await feed.subscribe("H0STASP0", sym)
         async for frame in feed:
             if kst_now() >= stop_at_kst:
                 break
             try:
                 tr_id, _enc, records = KisRealtimeFeed.parse_frame(frame)
-                if tr_id != "H0STCNT0":
+                if tr_id == "H0STCNT0":
+                    # H0STCNT0: [0]종목 [1]체결시각HHMMSS [2]현재가 ... [12]체결거래량
+                    for rec in records:
+                        if len(rec) < 13:
+                            continue
+                        hhmmss = rec[1]
+                        if len(hhmmss) != 6:
+                            continue
+                        ts_iso = f"{today}T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+09:00"
+                        try:
+                            price = int(rec[2])
+                            volume = int(rec[12])
+                        except (ValueError, IndexError):
+                            continue
+                        conn.execute(insert_tick, (rec[0], ts_iso, price, volume, None))
+                        tick_count += 1
+                elif tr_id == "H0STASP0":
+                    # SAFETY: cutoff 지난 경우 호가 insert skip
+                    _today = kst_now().date()
+                    if _today > _ORDERBOOK_CAPTURE_END_KST:
+                        if not _ob_cutoff_warned:
+                            print(f"  ORDERBOOK CAPTURE STOPPED: today {_today} > cutoff {_ORDERBOOK_CAPTURE_END_KST}", flush=True)
+                            _ob_cutoff_warned = True
+                        continue
+                    # H0STASP0: [0]종목 [1]영업시각 [2]호가시각HHMMSS
+                    # [3..12]매도호가1~10  [13..22]매수호가1~10
+                    # [23..32]매도잔량1~10 [33..42]매수잔량1~10
+                    for rec in records:
+                        if len(rec) < 43:
+                            continue
+                        hhmmss = rec[2]
+                        if len(hhmmss) != 6:
+                            continue
+                        ts_iso = f"{today}T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+09:00"
+                        try:
+                            ask_px = [int(rec[3 + i]) for i in range(5)]
+                            bid_px = [int(rec[13 + i]) for i in range(5)]
+                            ask_qty = [int(rec[23 + i]) for i in range(5)]
+                            bid_qty = [int(rec[33 + i]) for i in range(5)]
+                        except (ValueError, IndexError):
+                            continue
+                        conn.execute(insert_ob, (
+                            rec[0], ts_iso,
+                            ask_px[0], ask_qty[0], ask_px[1], ask_qty[1],
+                            ask_px[2], ask_qty[2], ask_px[3], ask_qty[3],
+                            ask_px[4], ask_qty[4],
+                            bid_px[0], bid_qty[0], bid_px[1], bid_qty[1],
+                            bid_px[2], bid_qty[2], bid_px[3], bid_qty[3],
+                            bid_px[4], bid_qty[4],
+                        ))
+                        ob_count += 1
+                else:
                     continue
-                # H0STCNT0 record fields (caret-split):
-                # [0]종목코드 [1]체결시각HHMMSS [2]현재가 ... [12]체결거래량
-                for rec in records:
-                    if len(rec) < 13:
-                        continue
-                    sym = rec[0]
-                    hhmmss = rec[1]
-                    if len(hhmmss) != 6:
-                        continue
-                    ts_iso = (
-                        f"{today}T{hhmmss[:2]}:{hhmmss[2:4]}:{hhmmss[4:6]}+09:00"
-                    )
-                    try:
-                        price = int(rec[2])
-                        volume = int(rec[12])
-                    except (ValueError, IndexError):
-                        continue
-                    conn.execute(insert_sql, (sym, ts_iso, price, volume, None))
-                    count += 1
-                if count > 0 and count % 500 == 0:
+                if (tick_count + ob_count) > 0 and (tick_count + ob_count) % 1000 == 0:
                     conn.commit()
-                    print(f"  [{kst_now():%H:%M:%S}] ticks={count}", flush=True)
+                    print(f"  [{kst_now():%H:%M:%S}] ticks={tick_count} ob={ob_count}", flush=True)
             except Exception as e:
-                print(f"  ! tick parse error: {e}", flush=True)
+                print(f"  ! parse error: {e}", flush=True)
                 continue
     conn.commit()
-    return count
+    return tick_count + ob_count
 
 
 def aggregate_ticks_to_seconds(conn: sqlite3.Connection, day: date,

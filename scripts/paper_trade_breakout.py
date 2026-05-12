@@ -25,9 +25,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# SAFETY GUARD: 호가 (orderbook) capture 자동 중단 cutoff (KST date).
+# 사용자 명시 (2026-05-12): 호가 데이터는 5/12 + 5/13 이틀만 누적, 그 이후는
+# capture 안 함 (용량 폭증 방지). 매 insert 전 KST today 가 이 날짜를 넘으면
+# orderbook insert skip. 더 모으려면 이 날짜를 수동으로 늘릴 것.
+_ORDERBOOK_CAPTURE_END_KST = date(2026, 5, 13)
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -95,10 +101,39 @@ async def main() -> int:
         " ts_iso TEXT NOT NULL, price INTEGER NOT NULL, volume INTEGER NOT NULL,"
         " aggressor TEXT);"
         "CREATE INDEX IF NOT EXISTS idx_ticks_sym_ts ON ticks(symbol, ts_iso);"
+        "CREATE TABLE IF NOT EXISTS orderbook ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,"
+        " ts_iso TEXT NOT NULL,"
+        " ask_px_1 INTEGER, ask_qty_1 INTEGER,"
+        " ask_px_2 INTEGER, ask_qty_2 INTEGER,"
+        " ask_px_3 INTEGER, ask_qty_3 INTEGER,"
+        " ask_px_4 INTEGER, ask_qty_4 INTEGER,"
+        " ask_px_5 INTEGER, ask_qty_5 INTEGER,"
+        " bid_px_1 INTEGER, bid_qty_1 INTEGER,"
+        " bid_px_2 INTEGER, bid_qty_2 INTEGER,"
+        " bid_px_3 INTEGER, bid_qty_3 INTEGER,"
+        " bid_px_4 INTEGER, bid_qty_4 INTEGER,"
+        " bid_px_5 INTEGER, bid_qty_5 INTEGER);"
+        "CREATE INDEX IF NOT EXISTS idx_ob_sym_ts ON orderbook(symbol, ts_iso);"
     )
     tick_conn.commit()
-    tick_sub = bus.subscribe(Tick, maxsize=200_000)  # 충분히 큰 queue
+    tick_sub = bus.subscribe(Tick, maxsize=200_000)
+    from ks_ws.domain import OrderBook as _OrderBook
+    # SAFETY: 호가 capture 는 _ORDERBOOK_CAPTURE_END_KST 까지만. 그 이후
+    # 시작 시 subscribe 자체 X (queue 도 안 차게).
+    _today_kst = datetime.now(UTC).astimezone(_KST).date()
+    _ob_capture_enabled = _today_kst <= _ORDERBOOK_CAPTURE_END_KST
+    if _ob_capture_enabled:
+        ob_sub = bus.subscribe(_OrderBook, maxsize=200_000)
+        log.info("Orderbook capture ENABLED (today %s ≤ cutoff %s)",
+                 _today_kst, _ORDERBOOK_CAPTURE_END_KST)
+    else:
+        ob_sub = None
+        log.warning("Orderbook capture DISABLED (today %s > cutoff %s) — "
+                    "용량 폭증 방지 가드. _ORDERBOOK_CAPTURE_END_KST 수정 필요.",
+                    _today_kst, _ORDERBOOK_CAPTURE_END_KST)
     tick_count = {"n": 0}
+    ob_count = {"n": 0}
 
     async def _tick_logger():
         async for t in tick_sub:
@@ -115,6 +150,44 @@ async def main() -> int:
             except Exception:
                 pass
     _tick_task = asyncio.create_task(_tick_logger())
+
+    async def _ob_logger():
+        # OrderBook 은 KisMarketDataHub HOT tier 가 H0STASP0 → OrderBook 으로 publish.
+        # top 5 단계 만 sqlite 저장. SAFETY: 매 insert 전 KST today 가 cutoff
+        # 넘으면 즉시 skip (예: process 가 자정 넘어 살아있을 때).
+        if ob_sub is None:
+            return
+        async for ob in ob_sub:
+            try:
+                # Date guard
+                _today = datetime.now(UTC).astimezone(_KST).date()
+                if _today > _ORDERBOOK_CAPTURE_END_KST:
+                    continue  # silently drop after cutoff
+                ap = list(ob.ask_prices)[:5] + [0] * 5
+                aq = list(ob.ask_quantities)[:5] + [0] * 5
+                bp = list(ob.bid_prices)[:5] + [0] * 5
+                bq = list(ob.bid_quantities)[:5] + [0] * 5
+                tick_conn.execute(
+                    "INSERT INTO orderbook (symbol, ts_iso, "
+                    "ask_px_1, ask_qty_1, ask_px_2, ask_qty_2, ask_px_3, ask_qty_3, "
+                    "ask_px_4, ask_qty_4, ask_px_5, ask_qty_5, "
+                    "bid_px_1, bid_qty_1, bid_px_2, bid_qty_2, bid_px_3, bid_qty_3, "
+                    "bid_px_4, bid_qty_4, bid_px_5, bid_qty_5"
+                    ") VALUES (?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?, ?,?)",
+                    (ob.symbol, ob.timestamp.isoformat(),
+                     int(ap[0]), int(aq[0]), int(ap[1]), int(aq[1]),
+                     int(ap[2]), int(aq[2]), int(ap[3]), int(aq[3]),
+                     int(ap[4]), int(aq[4]),
+                     int(bp[0]), int(bq[0]), int(bp[1]), int(bq[1]),
+                     int(bp[2]), int(bq[2]), int(bp[3]), int(bq[3]),
+                     int(bp[4]), int(bq[4])),
+                )
+                ob_count["n"] += 1
+                if ob_count["n"] % 500 == 0:
+                    tick_conn.commit()
+            except Exception:
+                pass
+    _ob_task = asyncio.create_task(_ob_logger()) if ob_sub is not None else None
 
     # --- Strategy entry windows (KST) ---
     # 각 strategy 가 자기 시간대에서만 BUY entry, SELL (TP/SL/force-close) 는 항상 통과.
@@ -272,8 +345,8 @@ async def main() -> int:
             pos = executor.positions
             opens = strategy.open_positions()
             cb_opens = closing_bet.open_positions()
-            log.info("[%s] submitted=%d rejected=%d ticks=%d brk_open=%s cb_open=%s doji_fired=%d",
-                     now.strftime("%H:%M:%S"), sub, rej, tick_count["n"],
+            log.info("[%s] submitted=%d rejected=%d ticks=%d ob=%d brk_open=%s cb_open=%s doji_fired=%d",
+                     now.strftime("%H:%M:%S"), sub, rej, tick_count["n"], ob_count["n"],
                      list(opens), list(cb_opens), len(fired_doji))
             if opens:
                 for sym, p in opens.items():
@@ -283,8 +356,13 @@ async def main() -> int:
 
     # Shutdown
     tick_sub.close()
+    if ob_sub is not None:
+        ob_sub.close()
     doji_sub.close()
-    for t in (_tick_task, _ohlc_task, _doji_task):
+    _tasks_to_cancel = [_tick_task, _ohlc_task, _doji_task]
+    if _ob_task is not None:
+        _tasks_to_cancel.append(_ob_task)
+    for t in _tasks_to_cancel:
         t.cancel()
         try:
             await t
@@ -292,7 +370,7 @@ async def main() -> int:
             pass
     tick_conn.commit()
     tick_conn.close()
-    log.info("Tick logger flushed: %d ticks", tick_count["n"])
+    log.info("Capture flushed: %d ticks, %d orderbook events", tick_count["n"], ob_count["n"])
 
     await executor.stop()
     await hub.stop()
