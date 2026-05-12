@@ -61,8 +61,9 @@ async def main() -> int:
     from ks_ws.storage.bars import BarStore
     from ks_ws.storage.ledger import Ledger
     from ks_ws.storage.universe import UniverseRegistry
-    from ks_ws.strategies.allocator import Allocator
+    from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
+    from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
     from ks_ws.events import DojiCandle
@@ -208,7 +209,28 @@ async def main() -> int:
     # Wrap entry windows. SELL signals (TP/SL, max_hold timeout, force-close) bypass.
     breakout_gated = EntryWindowGate(strategy, windows=[BREAKOUT_WINDOW])
     closing_bet_gated = EntryWindowGate(closing_bet, windows=[CLOSING_BET_WINDOW])
-    allocator = Allocator(max_position_per_symbol=10)
+
+    # FundamentalAllocator: BUY signals subject to per-symbol macro_score (RVOL).
+    # 시작 시 BarStore 일봉 으로 전일 RVOL (어제 거래대금 / 5일 평균) 계산 → score.
+    # 5/12 paper_trade 의 universe 변별 X 문제 해결: 약한 종목 entry 차단, 강한 종목 비중 ↑.
+    allocator = FundamentalAllocator(max_position_per_symbol=10, min_score=0.5)
+    macro_set = 0
+    for sym in codes:
+        bars = list(bar_store.read(sym, "1d"))
+        if len(bars) < 6:
+            continue
+        yesterday_value = bars[-1].value
+        prev_5d_avg = sum(b.value for b in bars[-6:-1]) / 5
+        if prev_5d_avg <= 0:
+            continue
+        rvol = yesterday_value / prev_5d_avg
+        score = score_from_rvol(rvol)
+        allocator.set_macro_score(sym, score)
+        macro_set += 1
+        log.info("  macro %s: yesterday_value=%d 5d_avg=%d RVOL=%.2f score=%.2f",
+                 sym, int(yesterday_value), int(prev_5d_avg), rvol, score)
+    log.info("Set macro_score for %d/%d symbols (min_score=0.5 BUY veto)", macro_set, len(codes))
+
     runtime = Runtime(bus, [breakout_gated, closing_bet_gated], allocator)
     log.info("Strategy entry windows (KST): breakout %s-%s, closing_bet %s-%s",
              *BREAKOUT_WINDOW, *CLOSING_BET_WINDOW)
