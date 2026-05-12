@@ -1,6 +1,6 @@
 """BottomVolumeSpikeStrategy (K) — 60일 저점 + 거래량 spike → trial position.
 
-book strategy.md 의 K:
+book technical_strategy.md 의 K:
 - entry: 60일 저점 ±5% + 거래량 spike (직전 5분 평균 ×3, 또는 5-day avg ×3)
 - exit: +5~10% 익절 / 60일 저점 -2% 이탈 손절
 - hold: 분~일 단위 (mean reversion)

@@ -33,7 +33,7 @@ class TimeWindowGate(Strategy):
     time windows. Outside windows, returns empty list.
 
     Windows are list of (start, end) tuples in KST. half-open [start, end).
-    Useful for enforcing strategy.md 시간대 가이드 (09:00-09:50 핫존,
+    Useful for enforcing technical_strategy.md 시간대 가이드 (09:00-09:50 핫존,
     09:03-09:25 OpeningMomentum, 13:30~ 종가베팅) without hardcoding inside
     strategies.
     """

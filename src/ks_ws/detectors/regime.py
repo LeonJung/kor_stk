@@ -1,6 +1,6 @@
 """MarketRegimeDetector — KOSPI 추세/breadth/drawdown 기반 regime classifier.
 
-regime 카테고리 (strategy.md 활성화 매트릭스 기준):
+regime 카테고리 (technical_strategy.md 활성화 매트릭스 기준):
 - ``strong_uptrend`` — 60일 이동평균 위 + 최근 20일 +10% 이상 + 강한 폭
 - ``uptrend`` — 60일 이동평균 위 + 횡보 아닌 상승
 - ``sideways`` — 60일 이동평균 ±3% 안 + 변동성 낮음

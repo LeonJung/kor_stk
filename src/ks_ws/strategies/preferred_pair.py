@@ -1,6 +1,6 @@
 """PreferredCommonPairStrategy (H) — 우선주/본주 가격 비율 평균 회귀.
 
-book strategy.md 의 H:
+book technical_strategy.md 의 H:
 - entry: 우선주/본주 비율이 N일 이동평균 대비 ±2σ 이탈
 - exit: 평균 회귀 시 / ±3σ 이탈 시 손절
 - regime: 횡보장 또는 하락장 (상승장에선 default 비활성)

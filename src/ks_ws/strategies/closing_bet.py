@@ -1,7 +1,7 @@
 """ClosingBetStrategy (I 도지 종가베팅) — 13:30 KST 이후 도지 캔들 종목에
 종가 베팅, 다음 거래일 시초가 청산.
 
-book strategy.md 의 I:
+book technical_strategy.md 의 I:
 - entry: 일봉 도지 + 13:30 이후 거래대금 평균 이상 + 최근 N일 추세 + 방향
 - exit: 다음날 시초가 +2% 청산 / 시초가 -3% 갭 다운 손절
 - hold: overnight, 1회 진입

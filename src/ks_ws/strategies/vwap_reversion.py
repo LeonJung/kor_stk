@@ -1,6 +1,6 @@
 """VWAPMeanReversionStrategy (F) — 장중 VWAP 평균 회귀 매매.
 
-book strategy.md 의 F:
+book technical_strategy.md 의 F:
 - entry: VWAP 대비 -k·σ 이탈 + 거래량 spike (직전 5분 평균 ×3)
 - exit: VWAP 회귀 시 / -2·σ 추가 이탈 시 손절
 - regime: 횡보장 default 활성, 강한 호재 종목 제외 필터

@@ -1,6 +1,6 @@
 """InstFgnFlowStrategy (J 수급 추적) — 외국인/기관 순매수 누적 추적 매매.
 
-book strategy.md 의 J:
+book technical_strategy.md 의 J:
 - entry: ProgramFlowEnter (기관) + ForeignNetBuy 누적 N일 양수 + 13:30 이후
 - exit: 외국인/기관 매도세 전환 시 즉시
 - hold: 1~3일 (단타-스윙 hybrid)
