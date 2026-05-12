@@ -31,8 +31,12 @@ log = logging.getLogger("ks_ws.sources.foreign_flow")
 # Subject to change; the KIS spec for 외국인·기관 매매동향 has multiple
 # endpoints depending on individual-stock vs market-wide. Adjust if a 404
 # or wrong-shape response is observed.
-_FOREIGN_FLOW_PATH = "/uapi/domestic-stock/v1/quotations/foreign-investor-stock-trend"
-_TR_ID_FOREIGN_FLOW = "FHKST01010900"
+_FOREIGN_FLOW_PATH = "/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily"
+_TR_ID_FOREIGN_FLOW = "FHPTJ04160001"
+
+# KIS investor-trade-by-stock-daily 응답의 frgn_ntby_tr_pbmn 등 _pbmn 필드는
+# **백만원 단위** (acml_tr_pbmn 의 원 단위와 다름). 우리 점수 입력은 원 단위 기준.
+_PBMN_UNIT_TO_KRW = 1_000_000
 
 ForeignFetcher = Callable[[str], int]
 
@@ -40,15 +44,27 @@ ForeignFetcher = Callable[[str], int]
 _KST = timezone(timedelta(hours=9))
 
 
-def kis_foreign_flow_fetcher(symbol: str, settings: Settings | None = None) -> int:
-    """Call KIS for the latest cumulative net foreign-buy KRW on a symbol.
-    Returns 0 if response missing the field; positive = net foreign buying.
+def kis_foreign_flow_fetcher(
+    symbol: str,
+    settings: Settings | None = None,
+    *,
+    date_yyyymmdd: str | None = None,
+) -> int:
+    """Call KIS investor-trade-by-stock-daily for a single symbol/date,
+    return net foreign buy in **KRW** (positive = net buying).
+
+    Response field ``frgn_ntby_tr_pbmn`` (외국인 순매수 거래대금) is in unit
+    of 백만원; we normalize back to KRW. ``output2`` carries the daily row.
+
+    KIS mock has time-limit (rt_cd=2 "TIME LIMIT") outside 정규장 — caller
+    typically passes ``date_yyyymmdd`` = 마지막 영업일 if running outside
+    market hours. 0 returned on any error / missing field.
     """
     settings = settings or get_settings()
     token = get_token(settings)
     client = make_client(settings)
     try:
-        today = datetime.now(_KST).strftime("%Y%m%d")
+        date_str = date_yyyymmdd or datetime.now(_KST).strftime("%Y%m%d")
         resp = client.get(
             _FOREIGN_FLOW_PATH,
             headers={
@@ -61,8 +77,9 @@ def kis_foreign_flow_fetcher(symbol: str, settings: Settings | None = None) -> i
             params={
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": symbol,
-                "FID_INPUT_DATE_1": today,
-                "FID_INPUT_DATE_2": today,
+                "FID_INPUT_DATE_1": date_str,
+                "FID_ORG_ADJ_PRC": "",
+                "FID_ETC_CLS_CODE": "",
             },
         )
         data = resp.json()
@@ -77,21 +94,23 @@ def kis_foreign_flow_fetcher(symbol: str, settings: Settings | None = None) -> i
         )
         return 0
 
-    rows = data.get("output") or data.get("output1") or []
+    # investor-trade-by-stock-daily: daily 행은 output2, output1 은 누적/요약.
+    rows = data.get("output2") or data.get("output1") or data.get("output") or []
     if isinstance(rows, dict):
         rows = [rows]
     if not rows:
         log.warning("foreign-flow response had no rows; data keys=%s", list(data)[:5])
         return 0
     head = rows[0]
-    for key in (
-        "frgn_ntby_tr_pbmn",  # 외국인 순매수 거래대금
-        "frgn_ntby_qty",
-        "ntby_pbmn",
+    # 우선순위: 거래대금 (백만원, unit normalize) > 주식수 (단위 그대로, score 의미는 다름)
+    for key, unit in (
+        ("frgn_ntby_tr_pbmn", _PBMN_UNIT_TO_KRW),
+        ("frgn_reg_ntby_pbmn", _PBMN_UNIT_TO_KRW),
+        ("frgn_ntby_qty", 1),  # fallback: 주식수 → 단위 의미 다름 (caller 인지)
     ):
         if key in head:
             try:
-                return int(head[key])
+                return int(head[key]) * unit
             except (ValueError, TypeError):
                 continue
     log.warning("foreign-flow response missing net-buy field; got keys=%s", list(head)[:8])

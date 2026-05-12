@@ -61,9 +61,14 @@ async def main() -> int:
     from ks_ws.storage.bars import BarStore
     from ks_ws.storage.ledger import Ledger
     from ks_ws.storage.universe import UniverseRegistry
+    from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
+    from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
-    from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
+    from ks_ws.strategies.fundamental_allocator import (
+        FundamentalAllocator,
+        score_from_foreign_flow_krw,
+    )
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
     from ks_ws.events import DojiCandle
@@ -210,9 +215,14 @@ async def main() -> int:
     breakout_gated = EntryWindowGate(strategy, windows=[BREAKOUT_WINDOW])
     closing_bet_gated = EntryWindowGate(closing_bet, windows=[CLOSING_BET_WINDOW])
 
-    # FundamentalAllocator: BUY signals subject to per-symbol macro_score (RVOL).
-    # 시작 시 BarStore 일봉 으로 전일 RVOL (어제 거래대금 / 5일 평균) 계산 → score.
+    # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
+    # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
+    # 어제 영업일 데이터) blend → set_macro_score. KOSPI top 20 외인 매매 단위
+    # ~수천억-수조 → strong_threshold=1조 사용.
     # 5/12 paper_trade 의 universe 변별 X 문제 해결: 약한 종목 entry 차단, 강한 종목 비중 ↑.
+    from datetime import timedelta as _td
+    _yest_date = (datetime.now(_KST) - _td(days=1)).strftime("%Y%m%d")
+    log.info("Computing macro_scores (RVOL + 외인 %s 데이터)", _yest_date)
     allocator = FundamentalAllocator(max_position_per_symbol=10, min_score=0.5)
     macro_set = 0
     for sym in codes:
@@ -224,11 +234,27 @@ async def main() -> int:
         if prev_5d_avg <= 0:
             continue
         rvol = yesterday_value / prev_5d_avg
-        score = score_from_rvol(rvol)
+        r_score = score_from_rvol(rvol)
+        # Foreign flow fetch (5/12 마지막 영업일). 실패 시 0 → neutral score 1.0
+        # 으로 강한 효과 X (RVOL 단독으로 fallback).
+        try:
+            foreign_net = kis_foreign_flow_fetcher(sym, date_yyyymmdd=_yest_date)
+        except Exception as e:
+            log.warning("  foreign_flow fetch failed for %s: %s", sym, e)
+            foreign_net = 0
+        f_score = (
+            score_from_foreign_flow_krw(foreign_net, strong_threshold_krw=1_000_000_000_000)
+            if foreign_net != 0
+            else 1.0
+        )
+        score = blend_macro_scores(r_score, f_score)
         allocator.set_macro_score(sym, score)
         macro_set += 1
-        log.info("  macro %s: yesterday_value=%d 5d_avg=%d RVOL=%.2f score=%.2f",
-                 sym, int(yesterday_value), int(prev_5d_avg), rvol, score)
+        fn_str = f"{foreign_net:+,d}"
+        log.info(
+            "  macro %s: RVOL=%.2f(r=%.2f) foreign=%s KRW(f=%.2f) blend=%.2f",
+            sym, rvol, r_score, fn_str, f_score, score,
+        )
     log.info("Set macro_score for %d/%d symbols (min_score=0.5 BUY veto)", macro_set, len(codes))
 
     runtime = Runtime(bus, [breakout_gated, closing_bet_gated], allocator)
