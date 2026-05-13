@@ -65,6 +65,7 @@ async def main() -> int:
     from ks_ws.orders import KisOrderRouter
     from ks_ws.risk import EnhancedRisk, Risk
     from ks_ws.runtime import Runtime
+    from ks_ws.sources.base_macro_refresher import BaseMacroRefresher
     from ks_ws.sources.dynamic_macro import DynamicMacroUpdater
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.foreign_trend import score_from_foreign_trend
@@ -75,6 +76,7 @@ async def main() -> int:
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
+    from ks_ws.sources.universe_expander import UniverseExpander
     from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
     from ks_ws.storage.bars import BarStore
@@ -85,6 +87,10 @@ async def main() -> int:
     from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
+    from ks_ws.strategies.volatility_breakout import (
+        VolatilityBreakoutStrategy,
+        compute_prev_high_low,
+    )
     from ks_ws.strategies.pattern_strategies import (
         BoxBreakoutStrategy,
         CupHandleStrategy,
@@ -104,6 +110,12 @@ async def main() -> int:
         e.code: (e.market if e.market in ("KOSPI", "KOSDAQ") else "KOSPI")
         for e in universe
     }
+    # Universe expander candidate pool — 시총 top 100 외 종목까지 폭증 감지.
+    # 실제 매매 subscription 은 top 20 만, 폭증 종목은 일단 log + sqlite 누적.
+    candidate_pool = [
+        e.code for e in reg.top_by_market_cap(100)
+        if e.code not in set(codes)
+    ]
     reg.close()
 
     log.info("=== Paper trade BREAKOUT on KIS mock ===")
@@ -261,6 +273,17 @@ async def main() -> int:
     triangle_strat = TriangleStrategy(**_PS_KW)
     wedge_strat = WedgeStrategy(**_PS_KW)
 
+    # VolatilityBreakout (Larry Williams) — 전일 H-L range x k 시가 돌파.
+    prev_hl = compute_prev_high_low(bar_store, codes)
+    log.info("Volatility breakout prev H-L computed for %d/%d symbols",
+             len(prev_hl), len(codes))
+    vol_breakout_strat = VolatilityBreakoutStrategy(
+        prev_high_low=prev_hl, k=0.5,
+        take_profit_pct=3.0, stop_loss_pct=2.0,
+        max_hold_minutes=360, confidence=0.65,
+        review_log=review_log,
+    )
+
     # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.
     macro_calendar = default_2026_q2_calendar()
     log.info("MacroCalendar loaded: %d events (CPI/PPI/FOMC/NFP 2026 Q2 seed)",
@@ -282,6 +305,7 @@ async def main() -> int:
     ch_gated = _gate(cup_handle_strat)
     tr_gated = _gate(triangle_strat)
     we_gated = _gate(wedge_strat)
+    vb_gated = _gate(vol_breakout_strat)
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -308,6 +332,7 @@ async def main() -> int:
     allocator = FundamentalAllocator(max_position_per_symbol=10, min_score=0.5)
     macro_set = 0
     base_macro: dict[str, float] = {}  # for DynamicMacroUpdater
+    static_scores: dict[str, tuple[float, float, float]] = {}  # for BaseMacroRefresher
     for sym in codes:
         bars = list(bar_store.read(sym, "1d"))
         if len(bars) < 6:
@@ -353,6 +378,7 @@ async def main() -> int:
         score = blend_macro_scores(r_score, f_score, v_score, mtr.combined)
         allocator.set_macro_score(sym, score)
         base_macro[sym] = score
+        static_scores[sym] = (r_score, f_score, v_score)
         macro_set += 1
         trend_sum = sum(daily_nets)
         tn_str = f"{trend_sum:+,d}"
@@ -371,7 +397,7 @@ async def main() -> int:
     runtime = Runtime(
         bus,
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
-         fp_gated, ch_gated, tr_gated, we_gated],
+         fp_gated, ch_gated, tr_gated, we_gated, vb_gated],
         allocator,
     )
     runtime.setup()
@@ -555,6 +581,30 @@ async def main() -> int:
     await dyn_macro.start()
     log.info("DynamicMacroUpdater started (base=%d symbols, markets=%s)",
              len(base_macro), set(sym_market.values()))
+
+    # BaseMacroRefresher — 분봉 mtr.minute_score 매 5분 재계산. DynamicMacroUpdater
+    # 의 base 가 시작 시점 분봉으로 고정되어 있던 한계 해소. 외인/RVOL/valuation 은
+    # 일봉 / 누적 데이터라 장중 변경 X — 그대로 static.
+    base_refresher = BaseMacroRefresher(
+        bus, bar_store, allocator, dyn_macro,
+        codes=codes, kospi_bars=kospi_bars, static_scores=static_scores,
+        interval_sec=300.0, minute_lookback=30,
+    )
+    await base_refresher.start()
+    log.info("BaseMacroRefresher started (5분 주기, 분봉 momentum 재계산)")
+
+    # UniverseExpander — 시총 top 21-100 종목 중 거래대금 폭증 자동 감지. 결과는
+    # data/universe_candidates.sqlite 누적 + UniverseCandidateDetected event.
+    # V1 은 mid-session subscription swap 안 함 — 누적 후 운영자가 다음 paper_trade
+    # 시작 시 universe 결정.
+    universe_expander = UniverseExpander(
+        bus, bar_store, candidate_pool,
+        recent_window_min=15, baseline_window_min=60,
+        surge_threshold=3.0, interval_sec=300.0,
+    )
+    await universe_expander.start()
+    log.info("UniverseExpander started (top 21-100 = %d candidates, "
+             "5분 주기, 3x 거래대금 폭증 감지)", len(candidate_pool))
 
     log.info("Live trading started; awaiting session stop 20:00 KST...")
 
