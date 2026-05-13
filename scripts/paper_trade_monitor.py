@@ -51,6 +51,9 @@ _STRATEGY_KR = {
     "dual_thrust": "듀얼트러스트",
     "opening_momentum": "시초모멘텀",
     "foreign_flow": "외국인수급",
+    "color_streak": "양봉연속",
+    "pivot_half_pullback": "피벗절반눌림",
+    "tape_burst": "체결폭주",
 }
 
 _NAMES = {

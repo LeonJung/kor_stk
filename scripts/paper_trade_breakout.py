@@ -93,6 +93,10 @@ async def main() -> int:
         BarStoreMA25Provider,
         BNFDisparityStrategy,
     )
+    from ks_ws.strategies.color_streak import (
+        ColorStreakStrategy,
+        compute_color_streak_setup,
+    )
     from ks_ws.strategies.dual_thrust import (
         DualThrustStrategy,
         compute_dual_thrust_ranges,
@@ -103,6 +107,11 @@ async def main() -> int:
     )
     from ks_ws.strategies.foreign_flow_strategy import ForeignFlowStrategy
     from ks_ws.strategies.opening_momentum import OpeningMomentumStrategy
+    from ks_ws.strategies.pivot_half_pullback import (
+        PivotHalfPullbackStrategy,
+        compute_pivots,
+    )
+    from ks_ws.strategies.tape_burst import TapeBurstStrategy
     from ks_ws.strategies.pattern_strategies import (
         BoxBreakoutStrategy,
         CupHandleStrategy,
@@ -382,6 +391,33 @@ async def main() -> int:
         review_log=review_log,
     )
 
+    # 양봉연속 — 17th. 최근 3+ 일봉 연속 양봉 → 다음 거래일 prev_close cross BUY.
+    color_setup = compute_color_streak_setup(bar_store, codes, min_streak=3)
+    log.info("ColorStreak setup: %d/%d 종목 N>=3 연속 양봉", len(color_setup), len(codes))
+    color_streak_strat = ColorStreakStrategy(
+        setup=color_setup,
+        take_profit_pct=3.0, stop_loss_pct=2.0,
+        max_hold_minutes=360, confidence=0.6,
+        review_log=review_log,
+    )
+
+    # 피벗절반눌림 — 18th. R1 도달 후 half_up cross BUY.
+    pivot_levels = compute_pivots(bar_store, codes)
+    pivot_pullback_strat = PivotHalfPullbackStrategy(
+        pivots=pivot_levels,
+        take_profit_pct=2.5, stop_loss_pct=2.0,
+        max_hold_minutes=240, confidence=0.6,
+        review_log=review_log,
+    )
+
+    # 체결폭주 — 19th. 분 단위 tick 수 3배 폭증 → BUY (15분 holding).
+    tape_burst_strat = TapeBurstStrategy(
+        baseline_minutes=10, burst_ratio=3.0, min_baseline_count=10,
+        take_profit_pct=1.5, stop_loss_pct=1.0,
+        max_hold_minutes=15, confidence=0.55,
+        review_log=review_log,
+    )
+
     # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.
     macro_calendar = default_2026_q2_calendar()
     log.info("MacroCalendar loaded: %d events (CPI/PPI/FOMC/NFP 2026 Q2 seed)",
@@ -412,6 +448,9 @@ async def main() -> int:
     # 와 strategy 의 entry_window_kst 가 중복 wrap 되어도 OK (둘 다 09:03-09:25 통과).
     opening_gated = _gate(opening_strat)
     ff_gated = _gate(foreign_flow_strat)
+    cs_gated = _gate(color_streak_strat)
+    pp_gated = _gate(pivot_pullback_strat)
+    tb_gated = _gate(tape_burst_strat)
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -504,6 +543,7 @@ async def main() -> int:
         "inverse_head_shoulders", "flag_pennant", "cup_handle", "triangle",
         "wedge", "volatility_breakout", "vwap_reversion", "nr7_breakout",
         "bnf_disparity", "dual_thrust", "opening_momentum", "foreign_flow",
+        "color_streak", "pivot_half_pullback", "tape_burst",
     ]
     weight_mgr = StrategyWeightManager(
         allocator, "data/trade_review.sqlite",
@@ -522,7 +562,8 @@ async def main() -> int:
         bus,
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
          fp_gated, ch_gated, tr_gated, we_gated, vb_gated, vwap_gated,
-         nr7_gated, bnf_gated, dt_gated, opening_gated, ff_gated],
+         nr7_gated, bnf_gated, dt_gated, opening_gated, ff_gated,
+         cs_gated, pp_gated, tb_gated],
         allocator,
     )
     runtime.setup()
