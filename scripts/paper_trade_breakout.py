@@ -69,8 +69,10 @@ async def main() -> int:
     from ks_ws.detectors.triangle import TriangleDetector
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.macro_score import blend_macro_scores
+    from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
     from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
+    from ks_ws.storage.trade_review import TradeReviewLog
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
     from ks_ws.strategies.fundamental_allocator import (
         FundamentalAllocator,
@@ -221,18 +223,27 @@ async def main() -> int:
     BREAKOUT_WINDOW = (time(8, 0), time(14, 30))
     CLOSING_BET_WINDOW = (time(13, 30), time(15, 25))
 
+    # TradeReviewLog — 사용자 명시 (2026-05-13): strategy 청산 시점 회고 누적.
+    # 모든 strategy (8개) 가 TP/SL/timeout 청산 시 record() 호출 → SQLite 영구 저장.
+    review_log = TradeReviewLog("data/trade_review.sqlite")
+    log.info("TradeReviewLog opened: data/trade_review.sqlite (%d existing rows)", len(review_log))
+
     strategy = LiveBreakoutStrategy(
-        high60=high60, take_profit_pct=2.0, stop_loss_pct=3.0, max_hold_minutes=60
+        high60=high60, take_profit_pct=2.0, stop_loss_pct=3.0, max_hold_minutes=60,
+        review_log=review_log,
     )
     closing_bet = ClosingBetStrategy(
         watchlist=set(codes),
         take_profit_pct=2.0,
         stop_loss_pct=3.0,
         confidence=0.5,
+        review_log=review_log,
     )
+
     # Pattern strategies — fed by detectors using BarStore daily history.
     _PS_KW = {"take_profit_pct": 3.0, "stop_loss_pct": 2.0,
-              "max_hold_minutes": 240, "confidence": 0.6}
+              "max_hold_minutes": 240, "confidence": 0.6,
+              "review_log": review_log}
     double_bottom_strat = DoubleBottomStrategy(**_PS_KW)
     box_breakout_strat = BoxBreakoutStrategy(**_PS_KW)
     inverse_hns_strat = InverseHeadShouldersStrategy(**_PS_KW)
@@ -469,6 +480,14 @@ async def main() -> int:
     await hub.start()
     await runtime.start()
     await executor.start()
+
+    # RealtimeInvestorFlow — 60s polling KOSPI/KOSDAQ 시장 단위 외인/기관 흐름.
+    # mock 의 "TIME LIMIT" 시간 외 응답은 source 가 None 반환으로 graceful skip.
+    investor_flow_source = RealtimeInvestorFlowSource(
+        bus, markets=("KOSPI", "KOSDAQ"), interval_sec=60.0,
+    )
+    await investor_flow_source.start()
+    log.info("RealtimeInvestorFlowSource started (KOSPI/KOSDAQ 60s polling)")
 
     log.info("Live trading started; awaiting session stop 20:00 KST...")
 
