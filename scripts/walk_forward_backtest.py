@@ -268,6 +268,28 @@ def main() -> int:
         print(f"  {_kr(strat):<18} {cells}   {mean:>5.1f}% "
               f"{std:>5.1f}  {cov:>4.2f}")
 
+    # --- Statistical significance (Wilson CI) ---
+    print("\n=== Statistical significance (Wilson 95% CI) ===\n")
+    print(f"  {'전략':<18} {'total_n':>7} {'total_wins':>10} "
+          f"{'CI_lower':>9} {'CI_upper':>9} {'above_50?':>10}")
+    print("  " + "-" * 70)
+    from ks_ws.stats.wilson_ci import wilson_ci
+    for strat in all_strategies:
+        total_n = sum(chunk_results[i].get(strat, {}).get("n", 0)
+                      for i in range(args.chunks))
+        if total_n < 10:
+            continue
+        # win count = sum of (win_rate × n) per chunk
+        total_wins = 0
+        for i in range(args.chunks):
+            r = chunk_results[i].get(strat, {})
+            if r.get("n"):
+                total_wins += int(round(r["win_rate"] / 100 * r["n"]))
+        ci = wilson_ci(total_wins, total_n)
+        above_50 = "YES" if ci.is_significantly_above(0.5) else "no"
+        print(f"  {_kr(strat):<18} {total_n:>7} {total_wins:>10} "
+              f"{ci.lower * 100:>8.1f}% {ci.upper * 100:>8.1f}% {above_50:>10}")
+
     # --- Trust classification ---
     print("\n=== 신뢰도 분류 (COV = std/mean) ===\n")
     print("  COV < 0.3 = 일관 (신뢰), 0.3-0.5 = 보통, > 0.5 = 들쭉날쭉 (우연 가능)\n")
