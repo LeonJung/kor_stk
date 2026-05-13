@@ -582,30 +582,31 @@ async def main() -> int:
         "bnf_disparity", "dual_thrust", "opening_momentum", "foreign_flow",
         "color_streak", "pivot_half_pullback", "tape_burst",
     ]
-    # Backtest baseline (2026-05-14 일봉 696일 + 분봉 30/90/180/400d 결과).
+    # Backtest baseline (2026-05-14 Monte Carlo 일괄 검증 cycle 38 기준).
     # review_log n < 5 시 이 baseline 사용. live 결과 누적 후 자동 override.
+    # ✓✓ alpha = >= 95 random percentile, ✗ = random 미만 (자동 비활성).
     _BACKTEST_BASELINE = {
-        # 일봉 양호 (역헤드앤숄더 78% / 삼각수렴 71% / 쌍바닥 53% / 깃발 58% /
-        # 웨지 57%) — boost
-        "inverse_head_shoulders": 1.2,
-        "triangle": 1.2,
-        "flag_pennant": 1.2,
-        "wedge": 1.0,
-        "double_bottom": 1.0,
-        # 분봉 양호 (변동성돌파 63% / BNF 54-77% / 피벗 long-term 69%) — boost
-        "volatility_breakout": 1.2,
-        "bnf_disparity": 1.2,
-        "pivot_half_pullback": 1.0,
-        # 마지노선 (양 timeframe 다 loser)
-        "nr7_breakout": 0.0,
-        "color_streak": 0.0,
-        "breakout": 0.5,  # 신고가매매 일봉 50% 분봉 23-31%
-        # 보통 (win 낮지만 +pnl, 또는 데이터 부족)
-        "opening_momentum": 1.0,
-        "dual_thrust": 0.8,
-        "cup_handle": 0.8,
-        "box_breakout": 0.8,
+        # ✓✓ alpha (Monte Carlo 100 percentile, random max 보다 위)
+        "inverse_head_shoulders": 1.2,  # 76.3% / random max 58.8%
+        "triangle": 1.2,                # 69.3% / random max 57.0%
+        # = random 동등 (1.0 default, 위험 적음)
+        "double_bottom": 1.0,           # 48.7% / random 48.5% — 55% percentile
+        "flag_pennant": 1.0,            # 58.8% / random max 76.5% — 72%
+        "wedge": 1.0,                   # 45.9% / random 49.4% — 27%
+        # ✗ random 미만 (Monte Carlo 검증 실패, 자동 비활성)
+        "breakout": 0.0,                # 50% / random 68% — 8% 미만
+        "box_breakout": 0.0,            # 40% / random 50% — 18%
+        "cup_handle": 0.0,              # 38.7% / random 48.6% — 2%
+        "nr7_breakout": 0.0,            # 36.6% / random 48.7% — 0%
+        "color_streak": 0.0,            # 16.7% / random 47.4% — 0%
+        "pivot_half_pullback": 0.0,     # 20% / random 55.2% — 3%
+        # 분봉 backtest (cycle 22-24 + Monte Carlo 미검증 — 일봉 검증 X)
+        # 분봉 strategies 는 별도 Monte Carlo 필요 — 일단 default 1.0
+        "volatility_breakout": 1.0,
+        "bnf_disparity": 1.0,
         "vwap_reversion": 1.0,
+        "opening_momentum": 1.0,
+        "dual_thrust": 1.0,
         # 분봉 검증 X (live tick 데이터 부족) — default
         "closing_bet": 1.0,
         "foreign_flow": 1.0,
