@@ -56,6 +56,13 @@ class _Lot:
     price: int
 
 
+def total_realized_pnl_krw(ledger: Ledger) -> int:
+    """Sum of all realized trade PnL across strategies. Used by LiveExecutor
+    to feed Risk.daily_loss_limit_krw circuit (live update from ledger)."""
+    stats = aggregate_strategy_pnl(ledger)
+    return int(sum(s.realized_pnl_krw for s in stats.values()))
+
+
 def aggregate_strategy_pnl(ledger: Ledger) -> dict[str, StrategyStats]:
     """Walk all fills in time order, FIFO match BUY → SELL per symbol, then
     distribute the realized PnL across the contributing strategies of the

@@ -74,6 +74,7 @@ async def main() -> int:
         MacroCalendarGate,
         default_2026_q2_calendar,
     )
+    from ks_ws.sources.ledger_pnl_sync import LedgerPnLSync
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.mock_fill_simulator import MockFillSimulator
     from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
@@ -768,6 +769,12 @@ async def main() -> int:
     )
     await fill_simulator.start()
     log.info("MockFillSimulator started (KIS mock fill 우회, cost 0.195%% SELL)")
+
+    # LedgerPnLSync — 매 60s ledger 의 realized PnL → executor.update_realized_pnl
+    # → Risk.daily_loss_limit 정확 동작.
+    pnl_sync = LedgerPnLSync(executor, ledger, interval_sec=60.0)
+    await pnl_sync.start()
+    log.info("LedgerPnLSync started (60s 주기 realized PnL → Risk)")
 
     # RealtimeInvestorFlow — 60s polling KOSPI/KOSDAQ 시장 단위 외인/기관 흐름.
     # mock 의 "TIME LIMIT" 시간 외 응답은 source 가 None 반환으로 graceful skip.
