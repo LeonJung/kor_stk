@@ -174,6 +174,10 @@ class LiveExecutor:
                 self._ledger.record_order(result)
             except Exception:
                 log.exception("ledger.record_order raised for %s", result.order_id)
+        # Publish SubmittedOrder so external fill simulators (mock environments)
+        # can react. Real-broker mode uses apply_fill_event from broker reconcile.
+        with contextlib.suppress(Exception):
+            self._bus.publish(result)
         self._update_position(approved)
 
     def _update_position(self, intent: OrderIntent) -> None:

@@ -75,6 +75,7 @@ async def main() -> int:
         default_2026_q2_calendar,
     )
     from ks_ws.sources.macro_score import blend_macro_scores
+    from ks_ws.sources.mock_fill_simulator import MockFillSimulator
     from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
     from ks_ws.sources.rvol import score_from_rvol
@@ -757,6 +758,16 @@ async def main() -> int:
     await hub.start()
     await runtime.start()
     await executor.start()
+
+    # MockFillSimulator — KIS mock 이 fill event 안 주는 환경 우회.
+    # SubmittedOrder 받으면 최근 tick price * (1 ± cost_bps) 로 apply_fill_event 호출.
+    # → ledger fills 정상 채워짐, realized PnL 추적 가능.
+    fill_simulator = MockFillSimulator(
+        bus, executor,
+        commission_bps=1.5, sell_tax_bps=18.0, slippage_bps=0.0,
+    )
+    await fill_simulator.start()
+    log.info("MockFillSimulator started (KIS mock fill 우회, cost 0.195%% SELL)")
 
     # RealtimeInvestorFlow — 60s polling KOSPI/KOSDAQ 시장 단위 외인/기관 흐름.
     # mock 의 "TIME LIMIT" 시간 외 응답은 source 가 None 반환으로 graceful skip.
