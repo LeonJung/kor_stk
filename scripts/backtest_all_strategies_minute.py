@@ -144,6 +144,10 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--days", type=int, default=30, help="lookback days (default 30 = 1개월)")
     p.add_argument("--top", type=int, default=20, help="universe size")
+    p.add_argument("--no-vwap", action="store_true",
+                   help="skip vwap_reversion (heavy per-tick σ calc)")
+    p.add_argument("--with-patterns", action="store_true",
+                   help="include pattern detectors (slow on 1m for >14d)")
     args = p.parse_args()
 
     bar_store = BarStore("data")
@@ -203,11 +207,14 @@ def main() -> int:
                                   stop_loss_pct=2.0),
         BNFDisparityStrategy(ma25_provider=ma25, disparity_pct=15.0,
                              take_profit_pct=5.0, stop_loss_pct=3.0),
-        VWAPMeanReversionStrategy(entry_sigma=1.5, stop_sigma=2.5,
-                                  volume_spike_multiplier=3.0),
         OpeningMomentumStrategy(watchlist=set(codes),
                                 surge_pct=5.0, take_profit_pct=3.0),
     ]
+    if not args.no_vwap:
+        strategies.append(
+            VWAPMeanReversionStrategy(entry_sigma=1.5, stop_sigma=2.5,
+                                      volume_spike_multiplier=3.0),
+        )
     print(f"Running {len(strategies)} strategies on minute bars...")
 
     # --- Build items: each bar → Tick + Bar ---
@@ -220,37 +227,43 @@ def main() -> int:
         ))
 
     # --- Pre-feed detectors → events ---
-    tmp_bus = _Bus(default_maxsize=2_000_000)
-    subs = [
-        tmp_bus.subscribe(t, maxsize=2_000_000) for t in (
-            DoubleBottomDetected, BoxBreakoutDetected, HeadShouldersDetected,
-            FlagPennantDetected, CupHandleDetected, TriangleDetected,
-            _WedgeDetected,
-        )
-    ]
-    detectors = [
-        DoubleBottomDetector(tmp_bus),
-        BoxBreakoutDetector(tmp_bus),
-        HeadShouldersDetector(tmp_bus),
-        FlagPennantDetector(tmp_bus),
-        CupHandleDetector(tmp_bus),
-        TriangleDetector(tmp_bus),
-        WedgeDetector(tmp_bus),
-    ]
-    by_sym = defaultdict(list)
-    for b in all_bars:
-        by_sym[b.symbol].append(b)
-    for _sym, sym_bars in by_sym.items():
-        sym_bars.sort(key=lambda b: b.timestamp)
-        for bar in sym_bars:
-            for det in detectors:
-                det.feed(bar)
+    # Pattern detectors are designed for daily bars; on 1m they accumulate
+    # huge buffers (O(n²) per-bar detect window). Default skip unless
+    # --with-patterns explicitly set (and small days window).
     captured_events: list = []
-    for sub in subs:
-        while sub.qsize() > 0:
-            captured_events.append(sub.get_nowait())
-        sub.close()
-    print(f"Detectors emitted {len(captured_events)} events")
+    if args.with_patterns:
+        tmp_bus = _Bus(default_maxsize=2_000_000)
+        subs = [
+            tmp_bus.subscribe(t, maxsize=2_000_000) for t in (
+                DoubleBottomDetected, BoxBreakoutDetected, HeadShouldersDetected,
+                FlagPennantDetected, CupHandleDetected, TriangleDetected,
+                _WedgeDetected,
+            )
+        ]
+        detectors = [
+            DoubleBottomDetector(tmp_bus),
+            BoxBreakoutDetector(tmp_bus),
+            HeadShouldersDetector(tmp_bus),
+            FlagPennantDetector(tmp_bus),
+            CupHandleDetector(tmp_bus),
+            TriangleDetector(tmp_bus),
+            WedgeDetector(tmp_bus),
+        ]
+        by_sym = defaultdict(list)
+        for b in all_bars:
+            by_sym[b.symbol].append(b)
+        for _sym, sym_bars in by_sym.items():
+            sym_bars.sort(key=lambda b: b.timestamp)
+            for bar in sym_bars:
+                for det in detectors:
+                    det.feed(bar)
+        for sub in subs:
+            while sub.qsize() > 0:
+                captured_events.append(sub.get_nowait())
+            sub.close()
+        print(f"Detectors emitted {len(captured_events)} events")
+    else:
+        print("Pattern detectors skipped (use --with-patterns to enable)")
 
     items.extend(captured_events)
     items.sort(key=lambda x: x.timestamp)
