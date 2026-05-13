@@ -140,6 +140,15 @@ class ManiaSignal(Event):
     news_count: int
 
 
+class DoubleBottomDetected(Event):
+    """W double-bottom pattern completed (neckline broken) (technical J1)."""
+
+    low1_price: int
+    low2_price: int
+    neckline_price: int
+    target_price: int
+
+
 class BoxBreakoutDetected(Event):
     """N-day box range broken to the upside with volume confirmation (technical J4)."""
 

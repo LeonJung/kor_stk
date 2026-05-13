@@ -25,16 +25,7 @@ from dataclasses import dataclass
 
 from ks_ws.bus import EventBus
 from ks_ws.domain import Bar
-from ks_ws.events import Event
-
-
-class DoubleBottomDetected(Event):
-    """W double-bottom pattern completed (neckline broken)."""
-
-    low1_price: int
-    low2_price: int
-    neckline_price: int
-    target_price: int  # neckline + (neckline - low) — measured move
+from ks_ws.events import DoubleBottomDetected  # neckline + (neckline - low) — measured move
 
 
 @dataclass
