@@ -600,13 +600,13 @@ async def main() -> int:
         "nr7_breakout": 0.0,            # 36.6% / random 48.7% — 0%
         "color_streak": 0.0,            # 16.7% / random 47.4% — 0%
         "pivot_half_pullback": 0.0,     # 20% / random 55.2% — 3%
-        # 분봉 backtest (cycle 22-24 + Monte Carlo 미검증 — 일봉 검증 X)
-        # 분봉 strategies 는 별도 Monte Carlo 필요 — 일단 default 1.0
-        "volatility_breakout": 1.0,
-        "bnf_disparity": 1.0,
-        "vwap_reversion": 1.0,
-        "opening_momentum": 1.0,
-        "dual_thrust": 1.0,
+        # 분봉 Monte Carlo (cycle 39) — 분봉 30일 기준:
+        "bnf_disparity": 1.2,           # 77.3% / random 58.3% — 100% percentile ✓✓
+        "volatility_breakout": 1.1,     # 65.3% / random 55.1% — 90% (약한 alpha)
+        # ✗ random 미만 (자동 비활성)
+        "vwap_reversion": 0.0,          # 27.7% / random 48.9% — 0%
+        "opening_momentum": 0.0,        # 20.3% / random 37.6% — 0%
+        "dual_thrust": 0.0,             # 41.7% / random 57.0% — 10%
         # 분봉 검증 X (live tick 데이터 부족) — default
         "closing_bet": 1.0,
         "foreign_flow": 1.0,
