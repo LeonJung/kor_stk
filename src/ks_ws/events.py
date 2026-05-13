@@ -140,6 +140,20 @@ class ManiaSignal(Event):
     news_count: int
 
 
+class RoundFigureReached(Event):
+    """Price crossed (within tolerance) a round-figure tick-size boundary.
+
+    Korean stock tick-size boundaries (호가단위 변경 경계) are key psychological
+    levels per 만쥬 책 Section 10: 2k / 5k / 20k / 50k / 200k / 500k won.
+    Additional round figures: 10k/100k/1M/etc. ``boundary_price`` is the exact
+    round-figure level; ``actual_price`` is current tick price.
+    """
+
+    boundary_price: int  # exact round-figure level reached
+    actual_price: int  # current tick price (may differ within tolerance)
+    distance_bp: float  # signed distance in basis points (positive = above)
+
+
 class DojiCandle(Event):
     """Daily bar形成 a doji pattern (open ≈ close, small body relative to range).
 
