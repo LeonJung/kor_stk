@@ -140,6 +140,36 @@ class ManiaSignal(Event):
     news_count: int
 
 
+class BoxBreakoutDetected(Event):
+    """N-day box range broken to the upside with volume confirmation (technical J4)."""
+
+    box_high: int
+    box_low: int
+    box_days: int
+    breakout_price: int
+    volume_multiplier: float  # today_volume / box_avg_volume
+
+
+class HeadShouldersDetected(Event):
+    """Head-and-Shoulders (bearish) or Inverse H&S (bullish) pattern complete (technical J6)."""
+
+    pattern: str  # "head_shoulders" or "inverse_head_shoulders"
+    left_shoulder_price: int
+    head_price: int
+    right_shoulder_price: int
+    neckline_price: int
+    target_price: int
+
+
+class SectorRotation(Event):
+    """Sector strength rotation — one sector strong, another likely next (fundamental P-B)."""
+
+    leading_sector: str
+    leading_strength: float  # RVOL-weighted return %
+    next_candidate_sector: str
+    next_candidate_strength: float
+
+
 class RoundFigureReached(Event):
     """Price crossed (within tolerance) a round-figure tick-size boundary.
 
