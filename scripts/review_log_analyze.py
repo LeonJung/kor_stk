@@ -47,6 +47,7 @@ _STRATEGY_KR = {
     "bnf_disparity": "BNF이격도",
     "dual_thrust": "듀얼트러스트",
     "opening_momentum": "시초모멘텀",
+    "foreign_flow": "외국인수급",
 }
 
 _NAMES = {

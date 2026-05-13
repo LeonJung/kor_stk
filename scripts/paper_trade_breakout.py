@@ -78,6 +78,7 @@ async def main() -> int:
     from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
     from ks_ws.sources.rvol import score_from_rvol
+    from ks_ws.sources.strategy_weight_manager import StrategyWeightManager
     from ks_ws.sources.universe_expander import UniverseExpander
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
     from ks_ws.storage.bars import BarStore
@@ -100,6 +101,7 @@ async def main() -> int:
         NR7BreakoutStrategy,
         compute_nr7_setup,
     )
+    from ks_ws.strategies.foreign_flow_strategy import ForeignFlowStrategy
     from ks_ws.strategies.opening_momentum import OpeningMomentumStrategy
     from ks_ws.strategies.pattern_strategies import (
         BoxBreakoutStrategy,
@@ -371,6 +373,15 @@ async def main() -> int:
         review_log=review_log,
     )
 
+    # 외국인수급 — 16th. ForeignNetBuy event spike → BUY (다음 tick 으로 진입).
+    foreign_flow_strat = ForeignFlowStrategy(
+        watchlist=set(codes),
+        strong_threshold_krw=100_000_000_000,  # 1000억 spike
+        take_profit_pct=3.0, stop_loss_pct=2.0,
+        max_hold_minutes=240, confidence=0.6,
+        review_log=review_log,
+    )
+
     # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.
     macro_calendar = default_2026_q2_calendar()
     log.info("MacroCalendar loaded: %d events (CPI/PPI/FOMC/NFP 2026 Q2 seed)",
@@ -400,6 +411,7 @@ async def main() -> int:
     # 시초 모멘텀은 09:03-09:25 그 자체가 entry window — 외부 EntryWindowGate
     # 와 strategy 의 entry_window_kst 가 중복 wrap 되어도 OK (둘 다 09:03-09:25 통과).
     opening_gated = _gate(opening_strat)
+    ff_gated = _gate(foreign_flow_strat)
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -485,6 +497,24 @@ async def main() -> int:
         )
     log.info("Set macro_score for %d/%d symbols (min_score=0.5 BUY veto)", macro_set, len(codes))
 
+    # Strategy weight 자동 조정 — review_log 14일 win_rate 기반.
+    # 효과 떨어진 strategy 자동 비활성화 (weight=0). 회복 시 재활성화.
+    _strategy_names = [
+        "breakout", "closing_bet", "double_bottom", "box_breakout",
+        "inverse_head_shoulders", "flag_pennant", "cup_handle", "triangle",
+        "wedge", "volatility_breakout", "vwap_reversion", "nr7_breakout",
+        "bnf_disparity", "dual_thrust", "opening_momentum", "foreign_flow",
+    ]
+    weight_mgr = StrategyWeightManager(
+        allocator, "data/trade_review.sqlite",
+        strategies=_strategy_names, days=14, n_min=5,
+    )
+    weight_mgr.refresh()
+    for w in weight_mgr.last_applied:
+        if w.reason in ("disabled", "weak"):
+            log.warning("  strategy %s: weight=%.1f reason=%s (n=%d win=%.1f%%)",
+                        w.strategy, w.weight, w.reason, w.n, w.win_rate * 100)
+
     # Construct Runtime first so its EventBus subscriptions exist BEFORE pattern
     # detectors publish historical-pattern events; otherwise startup-time events
     # would have no receiver and be dropped.
@@ -492,7 +522,7 @@ async def main() -> int:
         bus,
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
          fp_gated, ch_gated, tr_gated, we_gated, vb_gated, vwap_gated,
-         nr7_gated, bnf_gated, dt_gated, opening_gated],
+         nr7_gated, bnf_gated, dt_gated, opening_gated, ff_gated],
         allocator,
     )
     runtime.setup()
