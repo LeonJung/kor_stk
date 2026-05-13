@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from ks_ws.detectors.wedge import WedgeDetected
 from ks_ws.domain import Side, Tick
 from ks_ws.events import (
     BoxBreakoutDetected,
@@ -15,8 +16,8 @@ from ks_ws.strategies.pattern_strategies import (
     BoxBreakoutStrategy,
     DoubleBottomStrategy,
     InverseHeadShouldersStrategy,
+    WedgeStrategy,
 )
-
 
 _BASE = datetime(2026, 5, 13, 9, 0, tzinfo=UTC)
 
@@ -158,6 +159,61 @@ def test_invalid_pct() -> None:
         BoxBreakoutStrategy(stop_loss_pct=0)
     with pytest.raises(ValueError):
         InverseHeadShouldersStrategy(confidence=1.5)
+
+
+# --- WedgeStrategy ---
+
+
+def _wedge_event(
+    *,
+    wedge_type: str = "falling",
+    direction: str = "up",
+    breakout_price: int = 1100,
+) -> WedgeDetected:
+    return WedgeDetected(
+        symbol="005930", timestamp=_BASE,
+        wedge_type=wedge_type,
+        upper_first=1200, upper_last=1090,
+        lower_first=1000, lower_last=970,
+        breakout_price=breakout_price, direction=direction,
+    )
+
+
+def test_wedge_entry_on_falling_up_break() -> None:
+    s = WedgeStrategy()
+    sigs = s.on_event(_wedge_event())
+    assert len(sigs) == 1
+    assert sigs[0].side is Side.BUY
+    assert sigs[0].strategy == "wedge"
+    assert "falling_wedge" in (sigs[0].note or "")
+
+
+def test_wedge_skips_rising_wedge() -> None:
+    s = WedgeStrategy()
+    assert s.on_event(_wedge_event(wedge_type="rising", direction="down")) == []
+
+
+def test_wedge_skips_falling_with_down_break() -> None:
+    s = WedgeStrategy()
+    # Unusual but defensive: falling wedge with direction != "up" → skip.
+    assert s.on_event(_wedge_event(wedge_type="falling", direction="down")) == []
+
+
+def test_wedge_ignores_other_events() -> None:
+    s = WedgeStrategy()
+    ev = BoxBreakoutDetected(
+        symbol="005930", timestamp=_BASE,
+        box_high=1010, box_low=990, box_days=10,
+        breakout_price=1100, volume_multiplier=3.0,
+    )
+    assert s.on_event(ev) == []
+
+
+def test_wedge_tp_exit() -> None:
+    s = WedgeStrategy(take_profit_pct=3.0, stop_loss_pct=2.0)
+    s.on_event(_wedge_event(breakout_price=1100))
+    sigs = s.on_tick(_tick(1133))  # 1100 * 1.03
+    assert sigs and sigs[0].side is Side.SELL
 
 
 def test_open_positions_isolation() -> None:

@@ -43,6 +43,7 @@ _STRATEGY_KR = {
     "flag_pennant": "깃발페넌트매매",
     "cup_handle": "컵앤핸들매매",
     "triangle": "삼각수렴매매",
+    "wedge": "웨지매매",
 }
 
 _NAMES = {

@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -52,27 +52,28 @@ _KST = ZoneInfo("Asia/Seoul")
 async def main() -> int:
     from ks_ws.bus import EventBus
     from ks_ws.config import get_settings
-    from ks_ws.kis.realtime import KisRealtimeFeed
-    from ks_ws.live import LiveExecutor
-    from ks_ws.market.kis_hub import KisMarketDataHub
-    from ks_ws.orders import KisOrderRouter
-    from ks_ws.risk import EnhancedRisk, Risk
-    from ks_ws.runtime import Runtime
-    from ks_ws.storage.bars import BarStore
-    from ks_ws.storage.ledger import Ledger
-    from ks_ws.storage.universe import UniverseRegistry
     from ks_ws.detectors.box_breakout import BoxBreakoutDetector
     from ks_ws.detectors.cup_handle import CupHandleDetector
     from ks_ws.detectors.double_bottom import DoubleBottomDetector
     from ks_ws.detectors.flag_pennant import FlagPennantDetector
     from ks_ws.detectors.head_shoulders import HeadShouldersDetector
     from ks_ws.detectors.triangle import TriangleDetector
+    from ks_ws.detectors.wedge import WedgeDetector
+    from ks_ws.events import DojiCandle
+    from ks_ws.live import LiveExecutor
+    from ks_ws.market.kis_hub import KisMarketDataHub
+    from ks_ws.orders import KisOrderRouter
+    from ks_ws.risk import EnhancedRisk, Risk
+    from ks_ws.runtime import Runtime
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
     from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
+    from ks_ws.storage.bars import BarStore
+    from ks_ws.storage.ledger import Ledger
     from ks_ws.storage.trade_review import TradeReviewLog
+    from ks_ws.storage.universe import UniverseRegistry
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
     from ks_ws.strategies.fundamental_allocator import (
         FundamentalAllocator,
@@ -87,8 +88,8 @@ async def main() -> int:
         FlagPennantStrategy,
         InverseHeadShouldersStrategy,
         TriangleStrategy,
+        WedgeStrategy,
     )
-    from ks_ws.events import DojiCandle
 
     settings = get_settings()
     bar_store = BarStore("data")
@@ -250,6 +251,7 @@ async def main() -> int:
     flag_pennant_strat = FlagPennantStrategy(**_PS_KW)
     cup_handle_strat = CupHandleStrategy(**_PS_KW)
     triangle_strat = TriangleStrategy(**_PS_KW)
+    wedge_strat = WedgeStrategy(**_PS_KW)
 
     # Wrap entry windows. SELL signals (TP/SL, max_hold timeout, force-close) bypass.
     breakout_gated = EntryWindowGate(strategy, windows=[BREAKOUT_WINDOW])
@@ -261,6 +263,7 @@ async def main() -> int:
     fp_gated = EntryWindowGate(flag_pennant_strat, windows=[BREAKOUT_WINDOW])
     ch_gated = EntryWindowGate(cup_handle_strat, windows=[BREAKOUT_WINDOW])
     tr_gated = EntryWindowGate(triangle_strat, windows=[BREAKOUT_WINDOW])
+    we_gated = EntryWindowGate(wedge_strat, windows=[BREAKOUT_WINDOW])
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -320,7 +323,7 @@ async def main() -> int:
     runtime = Runtime(
         bus,
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
-         fp_gated, ch_gated, tr_gated],
+         fp_gated, ch_gated, tr_gated, we_gated],
         allocator,
     )
     runtime.setup()
@@ -354,6 +357,7 @@ async def main() -> int:
     fp_det = FlagPennantDetector(bus, publish=_make_pattern_publisher("flag_pennant"))
     ch_det = CupHandleDetector(bus, publish=_make_pattern_publisher("cup_handle"))
     tr_det = TriangleDetector(bus, publish=_make_pattern_publisher("triangle"))
+    we_det = WedgeDetector(bus, publish=_make_pattern_publisher("wedge"))
     for sym in codes:
         sym_bars = list(bar_store.read(sym, "1d"))
         if len(sym_bars) < 30:
@@ -365,14 +369,16 @@ async def main() -> int:
             fp_det.feed(bar)
             ch_det.feed(bar)
             tr_det.feed(bar)
+            we_det.feed(bar)
     log.info(
-        "Pattern detectors published: db=%d bb=%d hns=%d fp=%d ch=%d tr=%d symbols",
+        "Pattern detectors published: db=%d bb=%d hns=%d fp=%d ch=%d tr=%d we=%d symbols",
         len(emitted_per_kind.get("double_bottom", set())),
         len(emitted_per_kind.get("box_breakout", set())),
         len(emitted_per_kind.get("inverse_hns", set())),
         len(emitted_per_kind.get("flag_pennant", set())),
         len(emitted_per_kind.get("cup_handle", set())),
         len(emitted_per_kind.get("triangle", set())),
+        len(emitted_per_kind.get("wedge", set())),
     )
 
     # --- Doji emitter (for closing_bet) ---
@@ -435,7 +441,8 @@ async def main() -> int:
     # --- Hydrate closing_bet open positions from ledger (overnight) ---
     def _hydrate_closing_bet() -> None:
         from collections import defaultdict
-        from ks_ws.strategies.closing_bet import _Position, _ordinal
+
+        from ks_ws.strategies.closing_bet import _ordinal, _Position
         orders_by_id = {o["order_id"]: o for o in ledger.list_orders()}
         buys: dict[str, list[dict]] = defaultdict(list)
         sells: dict[str, int] = defaultdict(int)

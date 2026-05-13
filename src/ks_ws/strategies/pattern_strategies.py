@@ -21,6 +21,7 @@ import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from ks_ws.detectors.wedge import WedgeDetected
 from ks_ws.domain import Side, Signal, Tick
 from ks_ws.events import (
     BoxBreakoutDetected,
@@ -223,4 +224,22 @@ class TriangleStrategy(_PatternStrategyBase):
             event.breakout_price,
             event.timestamp,
             note=f"triangle_{event.variant}: apex_high={event.apex_high}",
+        )
+
+
+class WedgeStrategy(_PatternStrategyBase):
+    name = "wedge"
+
+    def on_event(self, event: Event) -> list[Signal]:
+        if not isinstance(event, WedgeDetected):
+            return []
+        # Only falling wedge with upward breakout = bullish reversal → BUY (현물).
+        # Rising wedge with downward breakout = bearish — skip.
+        if event.wedge_type != "falling" or event.direction != "up":
+            return []
+        return self._enter(
+            event.symbol,
+            event.breakout_price,
+            event.timestamp,
+            note=f"falling_wedge: upper={event.upper_first}→{event.upper_last}",
         )
