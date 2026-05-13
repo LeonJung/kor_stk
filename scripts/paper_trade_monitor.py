@@ -139,7 +139,11 @@ def _ledger_summary(today_kst_iso_prefix: str) -> str:
             lambda: {"buy": 0, "sell": 0, "buy_qty": 0, "sell_qty": 0}
         )
         for sym, side, qty, _ts, sources in rows:
-            src = (json.loads(sources) if sources else ["?"])[0] if isinstance(sources, str) and sources.startswith("[") else (sources or "?")
+            if isinstance(sources, str) and sources.startswith("["):
+                parsed = json.loads(sources) if sources else ["?"]
+                src = parsed[0] if parsed else "?"
+            else:
+                src = sources or "?"
             if isinstance(src, list):
                 src = src[0] if src else "?"
             by_strategy_sym[(src, sym)][side] += 1
@@ -166,9 +170,35 @@ def _ledger_summary(today_kst_iso_prefix: str) -> str:
     return "\n".join(out)
 
 
+def _review_log_summary() -> str:
+    """TradeReviewLog 의 strategy 별 누적 win_rate / total_pnl."""
+    db = Path("data/trade_review.sqlite")
+    if not db.exists():
+        return "  (trade_review.sqlite missing — no closed positions yet)"
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = list(conn.execute(
+            "SELECT strategy, COUNT(*), SUM(pnl_krw), "
+            "SUM(CASE WHEN pnl_krw > 0 THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN pnl_krw < 0 THEN 1 ELSE 0 END) "
+            "FROM trade_reviews GROUP BY strategy ORDER BY 1"
+        ))
+    finally:
+        conn.close()
+    if not rows:
+        return "  (no closed positions yet)"
+    out = [f"  {'strategy':<28} {'n':>4} {'total_pnl':>14} {'wins':>4} {'losses':>4} {'win%':>6}"]
+    out.append("  " + "-" * 70)
+    for strategy, n, total_pnl, wins, losses in rows:
+        kr = _STRATEGY_KR.get(strategy, strategy)
+        win_rate = (wins / n * 100) if n else 0.0
+        out.append(f"  {kr:<28} {n:>4} {(total_pnl or 0):>+14,} "
+                   f"{(wins or 0):>4} {(losses or 0):>4} {win_rate:>5.1f}%")
+    return "\n".join(out)
+
+
 def main() -> int:
     now_kst = datetime.now(_KST)
-    today_kst_iso_prefix = now_kst.strftime("%Y-%m-%dT00:00:00")
     today_utc_iso_prefix = (now_kst.replace(hour=0, minute=0, second=0)
                             .astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S"))
 
@@ -179,6 +209,8 @@ def main() -> int:
     print(_ticks_summary(today_utc_iso_prefix))
     print("\n[ledger orders by strategy / symbol]")
     print(_ledger_summary(today_utc_iso_prefix))
+    print("\n[trade_review.sqlite — 청산 회고 strategy 별 누적]")
+    print(_review_log_summary())
     return 0
 
 
