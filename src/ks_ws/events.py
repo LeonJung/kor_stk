@@ -170,6 +170,37 @@ class HeadShouldersDetected(Event):
     target_price: int
 
 
+class FlagPennantDetected(Event):
+    """Flag or pennant continuation pattern broken upward (technical J10/J11)."""
+
+    pole_change_pct: float  # original pole's percent rise
+    flag_high: int
+    flag_low: int
+    flag_days: int
+    breakout_price: int
+
+
+class CupHandleDetected(Event):
+    """Cup-and-handle bullish continuation pattern completed (technical J12)."""
+
+    cup_left_rim: int
+    cup_bottom: int
+    cup_right_rim: int
+    handle_high: int
+    handle_low: int
+    breakout_price: int
+
+
+class TriangleDetected(Event):
+    """Triangle (symmetrical/ascending/descending) broken in one direction (technical J7-J9)."""
+
+    variant: str  # "ascending" / "descending" / "symmetrical"
+    apex_high: int
+    apex_low: int
+    breakout_price: int
+    direction: str  # "up" / "down"
+
+
 class SectorRotation(Event):
     """Sector strength rotation — one sector strong, another likely next (fundamental P-B)."""
 
