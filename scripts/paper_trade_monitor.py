@@ -45,6 +45,8 @@ _STRATEGY_KR = {
     "triangle": "삼각수렴매매",
     "wedge": "웨지매매",
     "volatility_breakout": "변동성돌파",
+    "vwap_reversion": "VWAP평균회귀",
+    "nr7_breakout": "NR7돌파",
 }
 
 _NAMES = {

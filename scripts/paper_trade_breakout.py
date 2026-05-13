@@ -65,6 +65,7 @@ async def main() -> int:
     from ks_ws.orders import KisOrderRouter
     from ks_ws.risk import EnhancedRisk, Risk
     from ks_ws.runtime import Runtime
+    from ks_ws.sources.active_candidates import top_active_candidates
     from ks_ws.sources.base_macro_refresher import BaseMacroRefresher
     from ks_ws.sources.dynamic_macro import DynamicMacroUpdater
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
@@ -76,9 +77,8 @@ async def main() -> int:
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
-    from ks_ws.sources.active_candidates import top_active_candidates
-    from ks_ws.sources.universe_expander import UniverseExpander
     from ks_ws.sources.rvol import score_from_rvol
+    from ks_ws.sources.universe_expander import UniverseExpander
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
     from ks_ws.storage.bars import BarStore
     from ks_ws.storage.ledger import Ledger
@@ -88,9 +88,9 @@ async def main() -> int:
     from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
-    from ks_ws.strategies.volatility_breakout import (
-        VolatilityBreakoutStrategy,
-        compute_prev_high_low,
+    from ks_ws.strategies.nr7_breakout import (
+        NR7BreakoutStrategy,
+        compute_nr7_setup,
     )
     from ks_ws.strategies.pattern_strategies import (
         BoxBreakoutStrategy,
@@ -101,6 +101,11 @@ async def main() -> int:
         TriangleStrategy,
         WedgeStrategy,
     )
+    from ks_ws.strategies.volatility_breakout import (
+        VolatilityBreakoutStrategy,
+        compute_prev_high_low,
+    )
+    from ks_ws.strategies.vwap_reversion import VWAPMeanReversionStrategy
 
     settings = get_settings()
     bar_store = BarStore("data")
@@ -307,6 +312,28 @@ async def main() -> int:
         review_log=review_log,
     )
 
+    # VWAP 평균회귀 — 11th live strategy. 횡보장 위주, 강한 호재 종목 부적합 가능.
+    vwap_strat = VWAPMeanReversionStrategy(
+        watchlist=set(codes),
+        entry_sigma=1.5, stop_sigma=2.5,
+        volume_spike_multiplier=3.0,
+        confidence=0.5,
+        review_log=review_log,
+    )
+
+    # NR7 변동성 expansion — 12th live strategy. 일봉 7일 최소 range 후 다음날
+    # high 돌파 시 BUY.
+    nr7_setup = compute_nr7_setup(bar_store, codes)
+    nr7_count = sum(1 for v in nr7_setup.values() if v[1])
+    log.info("NR7 setup computed: %d/%d 종목이 NR7 candidate (오늘 = NR7 다음날)",
+             nr7_count, len(nr7_setup))
+    nr7_strat = NR7BreakoutStrategy(
+        setup=nr7_setup,
+        take_profit_pct=3.0, stop_loss_pct=2.0,
+        max_hold_minutes=360, confidence=0.6,
+        review_log=review_log,
+    )
+
     # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.
     macro_calendar = default_2026_q2_calendar()
     log.info("MacroCalendar loaded: %d events (CPI/PPI/FOMC/NFP 2026 Q2 seed)",
@@ -329,6 +356,8 @@ async def main() -> int:
     tr_gated = _gate(triangle_strat)
     we_gated = _gate(wedge_strat)
     vb_gated = _gate(vol_breakout_strat)
+    vwap_gated = _gate(vwap_strat)
+    nr7_gated = _gate(nr7_strat)
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -420,7 +449,8 @@ async def main() -> int:
     runtime = Runtime(
         bus,
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
-         fp_gated, ch_gated, tr_gated, we_gated, vb_gated],
+         fp_gated, ch_gated, tr_gated, we_gated, vb_gated, vwap_gated,
+         nr7_gated],
         allocator,
     )
     runtime.setup()

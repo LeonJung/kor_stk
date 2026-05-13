@@ -16,12 +16,14 @@ Tick 기반. Bar 도 받지만 (지정 timeframe) 1m bar 로부터 vwap baseline
 가능 (V1 은 tick 만 사용해 단순화).
 """
 
+import contextlib
 import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from ks_ws.domain import Side, Signal, Tick
+from ks_ws.storage.trade_review import TradeReview, TradeReviewLog
 from ks_ws.strategies.base import Strategy
 
 
@@ -77,6 +79,7 @@ class VWAPMeanReversionStrategy(Strategy):
         volume_spike_multiplier: float = 3.0,
         volume_window_seconds: int = 300,
         confidence: float = 0.5,
+        review_log: TradeReviewLog | None = None,
     ) -> None:
         if entry_sigma <= 0 or stop_sigma <= entry_sigma:
             raise ValueError("stop_sigma must exceed entry_sigma > 0")
@@ -90,9 +93,25 @@ class VWAPMeanReversionStrategy(Strategy):
         self.volume_spike_multiplier = volume_spike_multiplier
         self.volume_window = timedelta(seconds=volume_window_seconds)
         self.confidence = confidence
+        self.review_log = review_log
         self._state: dict[str, _SymbolState] = {}
         self._open: dict[str, _Position] = {}
         self._baseline_volume: dict[str, float] = {}
+
+    def _record_review(self, pos: "_Position", tick: Tick, *, exit_reason: str,
+                       exit_note: str) -> None:
+        if self.review_log is None:
+            return
+        with contextlib.suppress(Exception):
+            self.review_log.record(TradeReview(
+                strategy=self.name, symbol=tick.symbol,
+                entry_ts=pos.entry_time, entry_price=pos.entry_price, qty=1,
+                exit_ts=tick.timestamp, exit_price=tick.price,
+                pnl_krw=tick.price - pos.entry_price,
+                exit_reason=exit_reason,
+                entry_note=f"vwap_rev dip entry @ {pos.entry_price}",
+                exit_note=exit_note,
+            ))
 
     def on_tick(self, tick: Tick) -> list[Signal]:
         if self.watchlist is not None and tick.symbol not in self.watchlist:
@@ -146,6 +165,8 @@ class VWAPMeanReversionStrategy(Strategy):
         # Take profit when price returns to (or above) VWAP
         if tick.price >= state.vwap:
             del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="TP",
+                                exit_note=f"VWAP revert @ {tick.price}")
             return [
                 Signal(
                     symbol=tick.symbol,
@@ -162,6 +183,8 @@ class VWAPMeanReversionStrategy(Strategy):
             deviation = (tick.price - state.vwap) / sigma
             if deviation <= -self.stop_sigma:
                 del self._open[tick.symbol]
+                self._record_review(pos, tick, exit_reason="SL",
+                                    exit_note=f"VWAP stop {deviation:.2f}sigma")
                 return [
                     Signal(
                         symbol=tick.symbol,
@@ -170,7 +193,7 @@ class VWAPMeanReversionStrategy(Strategy):
                         urgency="high",
                         strategy=self.name,
                         timestamp=tick.timestamp,
-                        note=f"vwap stop {deviation:.2f}σ",
+                        note=f"vwap stop {deviation:.2f}sigma",
                     )
                 ]
         return []
