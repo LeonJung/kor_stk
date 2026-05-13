@@ -65,6 +65,7 @@ async def main() -> int:
     from ks_ws.orders import KisOrderRouter
     from ks_ws.risk import EnhancedRisk, Risk
     from ks_ws.runtime import Runtime
+    from ks_ws.sources.dynamic_macro import DynamicMacroUpdater
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
@@ -96,6 +97,10 @@ async def main() -> int:
     reg = UniverseRegistry("data/universe.sqlite")
     universe = reg.top_by_market_cap(20)  # KIS WS subscription max
     codes = [e.code for e in universe]
+    sym_market: dict[str, str] = {
+        e.code: (e.market if e.market in ("KOSPI", "KOSDAQ") else "KOSPI")
+        for e in universe
+    }
     reg.close()
 
     log.info("=== Paper trade BREAKOUT on KIS mock ===")
@@ -275,6 +280,7 @@ async def main() -> int:
     log.info("Computing macro_scores (RVOL + 외인 %s 데이터)", _yest_date)
     allocator = FundamentalAllocator(max_position_per_symbol=10, min_score=0.5)
     macro_set = 0
+    base_macro: dict[str, float] = {}  # for DynamicMacroUpdater
     for sym in codes:
         bars = list(bar_store.read(sym, "1d"))
         if len(bars) < 6:
@@ -309,6 +315,7 @@ async def main() -> int:
             per_str = pbr_str = "?"
         score = blend_macro_scores(r_score, f_score, v_score)
         allocator.set_macro_score(sym, score)
+        base_macro[sym] = score
         macro_set += 1
         fn_str = f"{foreign_net:+,d}"
         log.info(
@@ -495,6 +502,18 @@ async def main() -> int:
     )
     await investor_flow_source.start()
     log.info("RealtimeInvestorFlowSource started (KOSPI/KOSDAQ 60s polling)")
+
+    # DynamicMacroUpdater — MarketInvestorFlow event → allocator.set_macro_score
+    # 매 60s 자동 갱신. base_macro = 시작 시 RVOL+foreign_daily+valuation blend,
+    # 실시간 regime (시장 외인+기관 흐름) 으로 비례 조정.
+    dyn_macro = DynamicMacroUpdater(
+        bus, allocator,
+        base_scores=base_macro, symbol_markets=sym_market,
+        strong_krw=1_000_000_000_000,
+    )
+    await dyn_macro.start()
+    log.info("DynamicMacroUpdater started (base=%d symbols, markets=%s)",
+             len(base_macro), set(sym_market.values()))
 
     log.info("Live trading started; awaiting session stop 20:00 KST...")
 
