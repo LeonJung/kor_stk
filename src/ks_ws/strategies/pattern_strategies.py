@@ -23,9 +23,12 @@ from datetime import datetime, timedelta
 from ks_ws.domain import Side, Signal, Tick
 from ks_ws.events import (
     BoxBreakoutDetected,
+    CupHandleDetected,
     DoubleBottomDetected,
     Event,
+    FlagPennantDetected,
     HeadShouldersDetected,
+    TriangleDetected,
 )
 from ks_ws.strategies.base import Strategy
 
@@ -148,4 +151,50 @@ class InverseHeadShouldersStrategy(_PatternStrategyBase):
             event.neckline_price,
             event.timestamp,
             note=f"inv_h_s: neckline={event.neckline_price} target={event.target_price}",
+        )
+
+
+class FlagPennantStrategy(_PatternStrategyBase):
+    name = "flag_pennant"
+
+    def on_event(self, event: Event) -> list[Signal]:
+        if not isinstance(event, FlagPennantDetected):
+            return []
+        return self._enter(
+            event.symbol,
+            event.breakout_price,
+            event.timestamp,
+            note=f"flag/pennant: pole=+{event.pole_change_pct:.1f}% flag_high={event.flag_high}",
+        )
+
+
+class CupHandleStrategy(_PatternStrategyBase):
+    name = "cup_handle"
+
+    def on_event(self, event: Event) -> list[Signal]:
+        if not isinstance(event, CupHandleDetected):
+            return []
+        return self._enter(
+            event.symbol,
+            event.breakout_price,
+            event.timestamp,
+            note=f"cup_handle: rim={event.cup_left_rim} bottom={event.cup_bottom}",
+        )
+
+
+class TriangleStrategy(_PatternStrategyBase):
+    name = "triangle"
+
+    def on_event(self, event: Event) -> list[Signal]:
+        if not isinstance(event, TriangleDetected):
+            return []
+        # Only BUY on upward breakout (현물 매수). down breakout → SELL trigger 단
+        # 보유 안 한 종목엔 무의미. skip.
+        if event.direction != "up":
+            return []
+        return self._enter(
+            event.symbol,
+            event.breakout_price,
+            event.timestamp,
+            note=f"triangle_{event.variant}: apex_high={event.apex_high}",
         )

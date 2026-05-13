@@ -40,6 +40,9 @@ _STRATEGY_KR = {
     "double_bottom": "쌍바닥매매",
     "box_breakout": "박스권돌파매매",
     "inverse_head_shoulders": "역헤드앤숄더매매",
+    "flag_pennant": "깃발페넌트매매",
+    "cup_handle": "컵앤핸들매매",
+    "triangle": "삼각수렴매매",
 }
 
 _NAMES = {

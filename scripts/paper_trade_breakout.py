@@ -62,8 +62,11 @@ async def main() -> int:
     from ks_ws.storage.ledger import Ledger
     from ks_ws.storage.universe import UniverseRegistry
     from ks_ws.detectors.box_breakout import BoxBreakoutDetector
+    from ks_ws.detectors.cup_handle import CupHandleDetector
     from ks_ws.detectors.double_bottom import DoubleBottomDetector
+    from ks_ws.detectors.flag_pennant import FlagPennantDetector
     from ks_ws.detectors.head_shoulders import HeadShouldersDetector
+    from ks_ws.detectors.triangle import TriangleDetector
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.rvol import score_from_rvol
@@ -77,8 +80,11 @@ async def main() -> int:
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
     from ks_ws.strategies.pattern_strategies import (
         BoxBreakoutStrategy,
+        CupHandleStrategy,
         DoubleBottomStrategy,
+        FlagPennantStrategy,
         InverseHeadShouldersStrategy,
+        TriangleStrategy,
     )
     from ks_ws.events import DojiCandle
 
@@ -225,15 +231,14 @@ async def main() -> int:
         confidence=0.5,
     )
     # Pattern strategies — fed by detectors using BarStore daily history.
-    double_bottom_strat = DoubleBottomStrategy(
-        take_profit_pct=3.0, stop_loss_pct=2.0, max_hold_minutes=240, confidence=0.6,
-    )
-    box_breakout_strat = BoxBreakoutStrategy(
-        take_profit_pct=3.0, stop_loss_pct=2.0, max_hold_minutes=240, confidence=0.6,
-    )
-    inverse_hns_strat = InverseHeadShouldersStrategy(
-        take_profit_pct=3.0, stop_loss_pct=2.0, max_hold_minutes=240, confidence=0.6,
-    )
+    _PS_KW = {"take_profit_pct": 3.0, "stop_loss_pct": 2.0,
+              "max_hold_minutes": 240, "confidence": 0.6}
+    double_bottom_strat = DoubleBottomStrategy(**_PS_KW)
+    box_breakout_strat = BoxBreakoutStrategy(**_PS_KW)
+    inverse_hns_strat = InverseHeadShouldersStrategy(**_PS_KW)
+    flag_pennant_strat = FlagPennantStrategy(**_PS_KW)
+    cup_handle_strat = CupHandleStrategy(**_PS_KW)
+    triangle_strat = TriangleStrategy(**_PS_KW)
 
     # Wrap entry windows. SELL signals (TP/SL, max_hold timeout, force-close) bypass.
     breakout_gated = EntryWindowGate(strategy, windows=[BREAKOUT_WINDOW])
@@ -242,6 +247,9 @@ async def main() -> int:
     db_gated = EntryWindowGate(double_bottom_strat, windows=[BREAKOUT_WINDOW])
     bb_gated = EntryWindowGate(box_breakout_strat, windows=[BREAKOUT_WINDOW])
     hns_gated = EntryWindowGate(inverse_hns_strat, windows=[BREAKOUT_WINDOW])
+    fp_gated = EntryWindowGate(flag_pennant_strat, windows=[BREAKOUT_WINDOW])
+    ch_gated = EntryWindowGate(cup_handle_strat, windows=[BREAKOUT_WINDOW])
+    tr_gated = EntryWindowGate(triangle_strat, windows=[BREAKOUT_WINDOW])
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -300,7 +308,8 @@ async def main() -> int:
     # would have no receiver and be dropped.
     runtime = Runtime(
         bus,
-        [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated],
+        [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
+         fp_gated, ch_gated, tr_gated],
         allocator,
     )
     runtime.setup()
@@ -331,6 +340,9 @@ async def main() -> int:
     db_det = DoubleBottomDetector(bus, publish=_make_pattern_publisher("double_bottom"))
     bb_det = BoxBreakoutDetector(bus, publish=_make_pattern_publisher("box_breakout"))
     hns_det = HeadShouldersDetector(bus, publish=_make_pattern_publisher("inverse_hns"))
+    fp_det = FlagPennantDetector(bus, publish=_make_pattern_publisher("flag_pennant"))
+    ch_det = CupHandleDetector(bus, publish=_make_pattern_publisher("cup_handle"))
+    tr_det = TriangleDetector(bus, publish=_make_pattern_publisher("triangle"))
     for sym in codes:
         sym_bars = list(bar_store.read(sym, "1d"))
         if len(sym_bars) < 30:
@@ -339,12 +351,17 @@ async def main() -> int:
             db_det.feed(bar)
             bb_det.feed(bar)
             hns_det.feed(bar)
+            fp_det.feed(bar)
+            ch_det.feed(bar)
+            tr_det.feed(bar)
     log.info(
-        "Pattern detectors published: double_bottom=%d symbols, "
-        "box_breakout=%d, inverse_hns=%d",
+        "Pattern detectors published: db=%d bb=%d hns=%d fp=%d ch=%d tr=%d symbols",
         len(emitted_per_kind.get("double_bottom", set())),
         len(emitted_per_kind.get("box_breakout", set())),
         len(emitted_per_kind.get("inverse_hns", set())),
+        len(emitted_per_kind.get("flag_pennant", set())),
+        len(emitted_per_kind.get("cup_handle", set())),
+        len(emitted_per_kind.get("triangle", set())),
     )
 
     # --- Doji emitter (for closing_bet) ---
