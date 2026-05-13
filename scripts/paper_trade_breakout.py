@@ -49,6 +49,32 @@ log = logging.getLogger("paper_trade_breakout")
 _KST = ZoneInfo("Asia/Seoul")
 
 
+def _parse_worker_args() -> tuple[int, int]:
+    """Parse --worker-id / --total-workers from sys.argv. Returns (id, total).
+    Default = (0, 1) = single-worker mode (기존 동작).
+    """
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--worker-id", type=int, default=0,
+                   help="worker index (0-based)")
+    p.add_argument("--total-workers", type=int, default=1,
+                   help="total worker count (universe partition)")
+    args, _ = p.parse_known_args()
+    if args.total_workers <= 0:
+        raise ValueError("total_workers must be positive")
+    if not 0 <= args.worker_id < args.total_workers:
+        raise ValueError(f"worker_id must be in [0, {args.total_workers})")
+    return args.worker_id, args.total_workers
+
+
+def _partition_universe(
+    codes: list[str], worker_id: int, total: int,
+) -> list[str]:
+    """Hash partition: worker_id picks codes whose index % total == worker_id.
+    Stable + balanced across workers."""
+    return [c for i, c in enumerate(codes) if i % total == worker_id]
+
+
 async def main() -> int:
     from ks_ws.bus import EventBus
     from ks_ws.config import get_settings
@@ -161,6 +187,15 @@ async def main() -> int:
     log.info("Universe: 시총 top %d (%s...) + active top %d (%s)",
              top_market_n, ",".join(market_codes[:3]),
              len(active_codes), ",".join(active_codes) or "none")
+
+    # Phase 2.1 worker partition: 다중 worker process 시 universe 분배.
+    worker_id, total_workers = _parse_worker_args()
+    if total_workers > 1:
+        all_codes = list(codes)
+        codes = _partition_universe(codes, worker_id, total_workers)
+        log.info("Worker %d/%d: assigned %d/%d codes: %s",
+                 worker_id + 1, total_workers,
+                 len(codes), len(all_codes), ",".join(codes))
     # Universe expander candidate pool — top 100 시총 중 codes 외.
     candidate_pool = [
         e.code for e in reg.top_by_market_cap(100)
