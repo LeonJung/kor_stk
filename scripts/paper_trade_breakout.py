@@ -67,11 +67,13 @@ async def main() -> int:
     from ks_ws.runtime import Runtime
     from ks_ws.sources.dynamic_macro import DynamicMacroUpdater
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
+    from ks_ws.sources.foreign_trend import score_from_foreign_trend
     from ks_ws.sources.macro_calendar import (
         MacroCalendarGate,
         default_2026_q2_calendar,
     )
     from ks_ws.sources.macro_score import blend_macro_scores
+    from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
     from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
@@ -80,10 +82,7 @@ async def main() -> int:
     from ks_ws.storage.trade_review import TradeReviewLog
     from ks_ws.storage.universe import UniverseRegistry
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
-    from ks_ws.strategies.fundamental_allocator import (
-        FundamentalAllocator,
-        score_from_foreign_flow_krw,
-    )
+    from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
     from ks_ws.strategies.pattern_strategies import (
@@ -290,8 +289,22 @@ async def main() -> int:
     # ~수천억-수조 → strong_threshold=1조 사용.
     # 5/12 paper_trade 의 universe 변별 X 문제 해결: 약한 종목 entry 차단, 강한 종목 비중 ↑.
     from datetime import timedelta as _td
-    _yest_date = (datetime.now(_KST) - _td(days=1)).strftime("%Y%m%d")
-    log.info("Computing macro_scores (RVOL + 외인 %s 데이터)", _yest_date)
+    # N=5 영업일 (주말 skip) 어제 거슬러 올라가며 fetch — 단발 vs 추세 구분.
+    _now_kst = datetime.now(_KST)
+    _foreign_dates: list[str] = []
+    _d = _now_kst - _td(days=1)
+    while len(_foreign_dates) < 5:
+        if _d.weekday() < 5:  # Mon-Fri
+            _foreign_dates.append(_d.strftime("%Y%m%d"))
+        _d -= _td(days=1)
+    # 오래된 → 최근 순으로 시퀀스 (compute_trend_score 가 기대하는 순서)
+    _foreign_dates = list(reversed(_foreign_dates))
+    _yest_date = _foreign_dates[-1]
+    log.info("Computing macro_scores (RVOL + 외인 %d일 trend %s..%s + valuation"
+             " + multi-timeframe regime)",
+             len(_foreign_dates), _foreign_dates[0], _foreign_dates[-1])
+    # KOSPI 일봉 — multi-timeframe regime 의 daily index input
+    kospi_bars = list(bar_store.read("KOSPI", "1d"))
     allocator = FundamentalAllocator(max_position_per_symbol=10, min_score=0.5)
     macro_set = 0
     base_macro: dict[str, float] = {}  # for DynamicMacroUpdater
@@ -305,16 +318,20 @@ async def main() -> int:
             continue
         rvol = yesterday_value / prev_5d_avg
         r_score = score_from_rvol(rvol)
-        # Foreign flow fetch (5/12 마지막 영업일). 실패 시 0 → neutral score 1.0
-        # 으로 강한 효과 X (RVOL 단독으로 fallback).
-        try:
-            foreign_net = kis_foreign_flow_fetcher(sym, date_yyyymmdd=_yest_date)
-        except Exception as e:
-            log.warning("  foreign_flow fetch failed for %s: %s", sym, e)
-            foreign_net = 0
+        # Foreign flow N-day trend fetch. 단발 vs 추세 변별 — 5 일 연속 매도가
+        # 1일 -3조 보다 더 위험. 실패 시 0 → neutral score.
+        daily_nets: list[int] = []
+        for d in _foreign_dates:
+            try:
+                net = kis_foreign_flow_fetcher(sym, date_yyyymmdd=d)
+            except Exception as e:
+                log.warning("  foreign_flow %s/%s failed: %s", sym, d, e)
+                net = 0
+            daily_nets.append(net)
         f_score = (
-            score_from_foreign_flow_krw(foreign_net, strong_threshold_krw=1_000_000_000_000)
-            if foreign_net != 0
+            score_from_foreign_trend(daily_nets,
+                                     strong_n_threshold_krw=2_000_000_000_000)
+            if any(daily_nets)
             else 1.0
         )
         # Valuation (PER/PBR) — 4th input. KIS inquire-price endpoint 시간 제약 X.
@@ -327,14 +344,24 @@ async def main() -> int:
             log.warning("  valuation fetch failed for %s: %s", sym, e)
             v_score = 1.0
             per_str = pbr_str = "?"
-        score = blend_macro_scores(r_score, f_score, v_score)
+        # Multi-timeframe regime — 일봉 KOSPI + 종목 분봉 + (tick 없음 시작 시점).
+        minute_bars = list(bar_store.read(sym, "1m"))
+        mtr = compute_multi_regime(
+            index_bars=kospi_bars,
+            minute_bars=minute_bars[-30:] if minute_bars else [],
+        )
+        score = blend_macro_scores(r_score, f_score, v_score, mtr.combined)
         allocator.set_macro_score(sym, score)
         base_macro[sym] = score
         macro_set += 1
-        fn_str = f"{foreign_net:+,d}"
+        trend_sum = sum(daily_nets)
+        tn_str = f"{trend_sum:+,d}"
         log.info(
-            "  macro %s: RVOL=%.2f(r=%.2f) foreign=%s(f=%.2f) PER=%s/PBR=%s(v=%.2f) blend=%.2f",
-            sym, rvol, r_score, fn_str, f_score, per_str, pbr_str, v_score, score,
+            "  macro %s: RVOL=%.2f(r=%.2f) foreign_%dd=%s(f=%.2f) "
+            "PER=%s/PBR=%s(v=%.2f) mtr=%.2f(%s/m=%.2f) blend=%.2f",
+            sym, rvol, r_score, len(daily_nets), tn_str, f_score,
+            per_str, pbr_str, v_score, mtr.combined, mtr.daily_regime,
+            mtr.minute_score, score,
         )
     log.info("Set macro_score for %d/%d symbols (min_score=0.5 BUY veto)", macro_set, len(codes))
 
