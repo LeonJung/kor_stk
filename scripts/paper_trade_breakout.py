@@ -76,6 +76,7 @@ async def main() -> int:
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.multi_timeframe_regime import compute_multi_regime
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
+    from ks_ws.sources.active_candidates import top_active_candidates
     from ks_ws.sources.universe_expander import UniverseExpander
     from ks_ws.sources.rvol import score_from_rvol
     from ks_ws.sources.valuation import blend_per_pbr_score, fetch_valuation
@@ -104,14 +105,36 @@ async def main() -> int:
     settings = get_settings()
     bar_store = BarStore("data")
     reg = UniverseRegistry("data/universe.sqlite")
-    universe = reg.top_by_market_cap(20)  # KIS WS subscription max
-    codes = [e.code for e in universe]
-    sym_market: dict[str, str] = {
-        e.code: (e.market if e.market in ("KOSPI", "KOSDAQ") else "KOSPI")
-        for e in universe
-    }
-    # Universe expander candidate pool — 시총 top 100 외 종목까지 폭증 감지.
-    # 실제 매매 subscription 은 top 20 만, 폭증 종목은 일단 log + sqlite 누적.
+    # Universe = 시총 top 15 + 최근 7일 거래대금 폭증 top 5 (active) → max 20
+    # (KIS WS subscription 한도). active 가 비어있으면 시총 top 20 으로 fallback.
+    top_market_n = 15
+    top_active_n = 5
+    market_top = reg.top_by_market_cap(top_market_n)
+    market_codes = [e.code for e in market_top]
+    active = top_active_candidates(
+        Path("data/universe_candidates.sqlite"),
+        days=7, top_k=top_active_n, exclude_codes=set(market_codes),
+    )
+    active_codes = [c.symbol for c in active]
+    codes = market_codes + active_codes
+    # 부족하면 시총 다음 순위로 채움 (active 누적 부족 시 fallback)
+    if len(codes) < 20:
+        fill = reg.top_by_market_cap(20)
+        for e in fill:
+            if e.code not in codes:
+                codes.append(e.code)
+                if len(codes) >= 20:
+                    break
+    sym_market: dict[str, str] = {}
+    for e in reg.top_by_market_cap(200):
+        if e.code in codes:
+            sym_market[e.code] = (
+                e.market if e.market in ("KOSPI", "KOSDAQ") else "KOSPI"
+            )
+    log.info("Universe: 시총 top %d (%s...) + active top %d (%s)",
+             top_market_n, ",".join(market_codes[:3]),
+             len(active_codes), ",".join(active_codes) or "none")
+    # Universe expander candidate pool — top 100 시총 중 codes 외.
     candidate_pool = [
         e.code for e in reg.top_by_market_cap(100)
         if e.code not in set(codes)
