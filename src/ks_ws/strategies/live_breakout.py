@@ -18,10 +18,12 @@ Per-symbol state:
 - entry_time: 진입 시각
 """
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ks_ws.domain import Side, Signal, Tick
+from ks_ws.storage.trade_review import TradeReview, TradeReviewLog
 from ks_ws.strategies.base import Strategy
 
 
@@ -42,6 +44,7 @@ class LiveBreakoutStrategy(Strategy):
         stop_loss_pct: float = 3.0,
         max_hold_minutes: int = 60,
         confidence: float = 0.7,
+        review_log: TradeReviewLog | None = None,
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("pct must be positive")
@@ -52,12 +55,28 @@ class LiveBreakoutStrategy(Strategy):
         self.stop_loss_pct = stop_loss_pct
         self.max_hold = timedelta(minutes=max_hold_minutes)
         self.confidence = confidence
+        self.review_log = review_log
         self._open: dict[str, _Pos] = {}
         self._recent_ticks: dict[str, list[Tick]] = {}
         # edge detection: was previous tick above high60?
         self._was_above: dict[str, bool] = {}
         # same-day single entry guard: (symbol, date) already-entered set
         self._entered_today: set[tuple[str, object]] = set()
+
+    def _record_review(self, pos: _Pos, tick: Tick, *, exit_reason: str,
+                       exit_note: str) -> None:
+        if self.review_log is None:
+            return
+        pnl = tick.price - pos.entry  # qty=1 hint (Allocator decides real qty)
+        with contextlib.suppress(Exception):
+            self.review_log.record(TradeReview(
+                strategy=self.name, symbol=tick.symbol,
+                entry_ts=pos.entry_time, entry_price=pos.entry, qty=1,
+                exit_ts=tick.timestamp, exit_price=tick.price,
+                pnl_krw=pnl, exit_reason=exit_reason,
+                entry_note=f"breakout: {pos.entry} > 60d high",
+                exit_note=exit_note,
+            ))
 
     def on_tick(self, tick: Tick) -> list[Signal]:
         recents = self._recent_ticks.setdefault(tick.symbol, [])
@@ -71,13 +90,19 @@ class LiveBreakoutStrategy(Strategy):
             sl = pos.entry * (1 - self.stop_loss_pct / 100)
             if tick.price >= tp:
                 del self._open[tick.symbol]
+                self._record_review(pos, tick, exit_reason="TP",
+                                    exit_note=f"TP @ {tick.price}")
                 return [self._sig(tick, Side.SELL, note=f"TP @ {tick.price}")]
             if tick.price <= sl:
                 del self._open[tick.symbol]
+                self._record_review(pos, tick, exit_reason="SL",
+                                    exit_note=f"SL @ {tick.price}")
                 return [self._sig(tick, Side.SELL, urgency="high",
                                   note=f"SL @ {tick.price}")]
             if tick.timestamp - pos.entry_time >= self.max_hold:
                 del self._open[tick.symbol]
+                self._record_review(pos, tick, exit_reason="timeout",
+                                    exit_note="hold timeout")
                 return [self._sig(tick, Side.SELL, note="hold timeout")]
             return []
 

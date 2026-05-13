@@ -30,7 +30,7 @@ class _Position:
     symbol: str
     entry_time: datetime
     entry_price: int
-    open_day: int  # 연도×366 + julian — for "next day" detection
+    open_day: int  # year*366 + julian — for "next day" detection
 
 
 class ClosingBetStrategy(Strategy):
@@ -44,6 +44,7 @@ class ClosingBetStrategy(Strategy):
         take_profit_pct: float = 2.0,
         stop_loss_pct: float = 3.0,
         confidence: float = 0.5,
+        review_log: object | None = None,  # TradeReviewLog | None
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("take_profit_pct and stop_loss_pct must be positive")
@@ -54,8 +55,27 @@ class ClosingBetStrategy(Strategy):
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
         self.confidence = confidence
+        self.review_log = review_log
         self._open: dict[str, _Position] = {}
         self._last_observed_kst: datetime | None = None
+
+    def _record_review(self, pos: _Position, tick: Tick, *, exit_reason: str,
+                       exit_note: str) -> None:
+        if self.review_log is None:
+            return
+        import contextlib
+
+        from ks_ws.storage.trade_review import TradeReview
+        pnl = tick.price - pos.entry_price
+        with contextlib.suppress(Exception):
+            self.review_log.record(TradeReview(
+                strategy=self.name, symbol=tick.symbol,
+                entry_ts=pos.entry_time, entry_price=pos.entry_price, qty=1,
+                exit_ts=tick.timestamp, exit_price=tick.price,
+                pnl_krw=pnl, exit_reason=exit_reason,
+                entry_note=f"closing_bet doji overnight (open_day={pos.open_day})",
+                exit_note=exit_note,
+            ))
 
     def on_tick(self, tick: Tick) -> list[Signal]:
         self._last_observed_kst = tick.timestamp.astimezone(_KST)
@@ -76,9 +96,13 @@ class ClosingBetStrategy(Strategy):
         sl = pos.entry_price * (1 - self.stop_loss_pct / 100)
         if tick.price >= tp:
             del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="TP",
+                                exit_note=f"TP @ {tick.price}")
             return [self._exit(tick, note=f"take-profit @ {tick.price}")]
         if tick.price <= sl:
             del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="SL",
+                                exit_note=f"SL @ {tick.price}")
             return [self._exit(tick, note=f"stop-loss @ {tick.price}", urgency="high")]
         return []
 
