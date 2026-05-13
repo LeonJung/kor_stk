@@ -17,6 +17,7 @@ All consume Tick on_tick for TP/SL exits while holding (parallels LiveBreakout).
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -30,6 +31,7 @@ from ks_ws.events import (
     HeadShouldersDetected,
     TriangleDetected,
 )
+from ks_ws.storage.trade_review import TradeReview, TradeReviewLog
 from ks_ws.strategies.base import Strategy
 
 
@@ -37,6 +39,9 @@ from ks_ws.strategies.base import Strategy
 class _Pos:
     entry: int
     entry_time: datetime
+    qty_hint: int = 1
+    entry_note: str | None = None
+    macro_score: float | None = None
 
 
 class _PatternStrategyBase(Strategy):
@@ -51,6 +56,7 @@ class _PatternStrategyBase(Strategy):
         stop_loss_pct: float = 2.0,
         max_hold_minutes: int = 240,
         confidence: float = 0.6,
+        review_log: TradeReviewLog | None = None,
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("pct must be positive")
@@ -60,8 +66,25 @@ class _PatternStrategyBase(Strategy):
         self.stop_loss_pct = stop_loss_pct
         self.max_hold = timedelta(minutes=max_hold_minutes)
         self.confidence = confidence
+        self.review_log = review_log
         self._open: dict[str, _Pos] = {}
         self._entered_today: set[tuple[str, object]] = set()
+
+    def _record_review(self, pos: _Pos, tick: Tick, *, exit_reason: str,
+                       exit_note: str) -> None:
+        if self.review_log is None:
+            return
+        pnl = (tick.price - pos.entry) * pos.qty_hint
+        # Review logging never breaks trading.
+        with contextlib.suppress(Exception):
+            self.review_log.record(TradeReview(
+                strategy=self.name, symbol=tick.symbol,
+                entry_ts=pos.entry_time, entry_price=pos.entry, qty=pos.qty_hint,
+                exit_ts=tick.timestamp, exit_price=tick.price,
+                pnl_krw=pnl, exit_reason=exit_reason,
+                entry_note=pos.entry_note, exit_note=exit_note,
+                macro_score_at_entry=pos.macro_score,
+            ))
 
     def _exit_check(self, tick: Tick) -> list[Signal]:
         pos = self._open.get(tick.symbol)
@@ -71,14 +94,17 @@ class _PatternStrategyBase(Strategy):
         sl = pos.entry * (1 - self.stop_loss_pct / 100)
         if tick.price >= tp:
             del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="TP", exit_note=f"TP @ {tick.price}")
             return [self._sig(tick.symbol, tick.timestamp, Side.SELL,
                               note=f"TP @ {tick.price}")]
         if tick.price <= sl:
             del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="SL", exit_note=f"SL @ {tick.price}")
             return [self._sig(tick.symbol, tick.timestamp, Side.SELL,
                               urgency="high", note=f"SL @ {tick.price}")]
         if tick.timestamp - pos.entry_time >= self.max_hold:
             del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="timeout", exit_note="hold timeout")
             return [self._sig(tick.symbol, tick.timestamp, Side.SELL,
                               note="hold timeout")]
         return []
