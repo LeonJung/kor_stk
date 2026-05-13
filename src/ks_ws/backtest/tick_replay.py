@@ -64,10 +64,24 @@ class TickReplayDriver:
         fill_price_for: dict[str, int] | None = None,
         last_tick_fill: bool = True,
         ledger_path: Path | None = None,
+        commission_bps: float = 1.5,  # 0.015% 매수+매도 각각
+        sell_tax_bps: float = 18.0,  # 0.18% 매도 증권거래세 (KOSPI)
+        slippage_bps: float = 0.0,  # buy 가격 ↑ / sell 가격 ↓ 시뮬
     ) -> None:
         """``fill_price_for`` 는 symbol → 기본 fill 가격. ``last_tick_fill`` 가
         True 면 해당 symbol 의 가장 최근 Tick 가격으로 fill (가장 현실적).
-        둘 다 없으면 fill 가격 0 (기록은 되지만 PnL 0)."""
+        둘 다 없으면 fill 가격 0 (기록은 되지만 PnL 0).
+
+        ``commission_bps`` / ``sell_tax_bps`` / ``slippage_bps`` 는 BPS (1/100%
+        = 0.01%) 단위. 기본값 = 한국 주식 평균:
+        - commission 0.015% (BUY + SELL 각각)
+        - sell_tax 0.18% (SELL 만, 증권거래세)
+        - slippage 0% (사용자 설정)
+
+        Effective fill price:
+        - BUY: tick.price * (1 + slippage_bps/10000 + commission_bps/10000)
+        - SELL: tick.price * (1 - slippage_bps/10000 - commission_bps/10000 - sell_tax_bps/10000)
+        """
         self.items = list(items)
         self.bus = EventBus()
         self.runtime = Runtime(self.bus, strategies, allocator or Allocator())
@@ -75,6 +89,9 @@ class TickReplayDriver:
         self.intents_sub = self.bus.subscribe(OrderIntent)
         self.fill_price_for = dict(fill_price_for or {})
         self.last_tick_fill = last_tick_fill
+        self.commission_bps = commission_bps
+        self.sell_tax_bps = sell_tax_bps
+        self.slippage_bps = slippage_bps
         self._last_price: dict[str, int] = {}
         self._ledger_owner = ledger_path is None
         self._ledger_dir: TemporaryDirectory | None = None
@@ -85,7 +102,15 @@ class TickReplayDriver:
         self._intents: list[OrderIntent] = []
         self._fills: list[tuple[OrderIntent, int]] = []
 
-    def __enter__(self) -> "TickReplayDriver":
+    def _effective_fill_price(self, intent: OrderIntent, mid_price: int) -> int:
+        """Apply commission + sell_tax + slippage to mid_price."""
+        bps = self.commission_bps + self.slippage_bps
+        if intent.side == Side.SELL:
+            bps += self.sell_tax_bps
+            return max(1, int(mid_price * (1 - bps / 10000)))
+        return max(1, int(mid_price * (1 + bps / 10000)))
+
+    def __enter__(self) -> TickReplayDriver:
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -145,9 +170,10 @@ class TickReplayDriver:
         )
 
     def _record_fill(self, intent: OrderIntent, *, fill_price: int) -> None:
+        eff_price = self._effective_fill_price(intent, fill_price)
         order_id = f"o-{len(self._fills) + 1}"
         submitted = SubmittedOrder(
-            order_id=order_id, intent=intent, submitted_at=intent.timestamp
+            order_id=order_id, intent=intent, submitted_at=intent.timestamp,
         )
         self.ledger.record_order(submitted)
         self.ledger.apply_fill(
@@ -155,9 +181,9 @@ class TickReplayDriver:
             symbol=intent.symbol,
             side=intent.side,
             quantity=intent.quantity,
-            price=fill_price,
+            price=eff_price,
         )
-        self._fills.append((intent, fill_price))
+        self._fills.append((intent, eff_price))
 
 
 def _item_key(item: Bar | Tick | OrderBook | Event) -> tuple[datetime, int]:

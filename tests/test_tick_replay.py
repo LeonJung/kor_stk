@@ -1,6 +1,6 @@
 """Tests for TickReplayDriver + scenario loader."""
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, time
 from textwrap import dedent
 from zoneinfo import ZoneInfo
 
@@ -103,12 +103,76 @@ def test_driver_fill_price_uses_last_tick_by_default():
         LimitUpReached(symbol="LEADER", timestamp=_kst(9, 10), limit_up_price=13000, prev_close=10000),
         Tick(symbol="FOLLOW", timestamp=_kst(9, 11), price=10000, volume=10),
     ]
-    with TickReplayDriver(items, [pair]) as driver:
+    # commission_bps=0 to verify mid-price fill behavior (cost adjustment
+    # tested separately).
+    with TickReplayDriver(
+        items, [pair], commission_bps=0, sell_tax_bps=0, slippage_bps=0,
+    ) as driver:
         result = driver.run()
     # Single buy intent should be filled at the latest FOLLOW tick price (10000)
     intent, fill_price = result.fills[0]
     assert intent.side.value == "buy"
     assert fill_price == 10000
+
+
+# Trading cost model -------------------------------------------------------
+
+
+def test_driver_buy_fill_adds_commission_and_slippage():
+    pair = PairFollowStrategy(pairs={"LEADER": "FOLLOW"})
+    items = [
+        LimitUpReached(symbol="LEADER", timestamp=_kst(9, 10),
+                       limit_up_price=13000, prev_close=10000),
+        Tick(symbol="FOLLOW", timestamp=_kst(9, 11), price=10000, volume=10),
+    ]
+    # commission 0.015% + slippage 0.05% = 0.065% surcharge on BUY
+    with TickReplayDriver(
+        items, [pair], commission_bps=1.5, sell_tax_bps=18.0, slippage_bps=5,
+    ) as driver:
+        result = driver.run()
+    intent, fill_price = result.fills[0]
+    assert intent.side.value == "buy"
+    # 10000 * (1 + 6.5/10000) = 10006.5 → 10006 (int truncate)
+    assert fill_price == 10006
+
+
+def test_driver_sell_fill_subtracts_commission_tax_slippage():
+    """SELL fill = price * (1 - commission - tax - slippage)."""
+    from ks_ws.backtest.tick_replay import TickReplayDriver
+    from ks_ws.domain import OrderIntent
+
+    items = [
+        Tick(symbol="A", timestamp=_kst(9, 0), price=10000, volume=10),
+    ]
+    with TickReplayDriver(
+        items, [], commission_bps=1.5, sell_tax_bps=18.0, slippage_bps=0,
+    ) as driver:
+        # Direct test of _effective_fill_price
+        buy = OrderIntent(symbol="A", side="buy", quantity=1,
+                          timestamp=_kst(9, 0), sources=("test",))
+        sell = OrderIntent(symbol="A", side="sell", quantity=1,
+                           timestamp=_kst(9, 0), sources=("test",))
+        buy_price = driver._effective_fill_price(buy, 10000)
+        sell_price = driver._effective_fill_price(sell, 10000)
+    # BUY = 10000 * 1.00015 = 10001.5 → 10001
+    assert buy_price == 10001
+    # SELL = 10000 * (1 - 0.0195/100) = 10000 * 0.998050 = 9980 (int floor)
+    # Actually: 10000 * (1 - 0.00195) = 9980.5 → 9980
+    assert sell_price == 9980
+
+
+def test_driver_zero_cost_returns_mid_price():
+    from ks_ws.domain import OrderIntent
+    items = [Tick(symbol="A", timestamp=_kst(9, 0), price=10000, volume=10)]
+    with TickReplayDriver(
+        items, [], commission_bps=0, sell_tax_bps=0, slippage_bps=0,
+    ) as driver:
+        buy = OrderIntent(symbol="A", side="buy", quantity=1,
+                          timestamp=_kst(9, 0), sources=("test",))
+        sell = OrderIntent(symbol="A", side="sell", quantity=1,
+                           timestamp=_kst(9, 0), sources=("test",))
+        assert driver._effective_fill_price(buy, 10000) == 10000
+        assert driver._effective_fill_price(sell, 10000) == 10000
 
 
 # Scenario YAML loader ----------------------------------------------------
