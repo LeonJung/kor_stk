@@ -67,6 +67,10 @@ async def main() -> int:
     from ks_ws.runtime import Runtime
     from ks_ws.sources.dynamic_macro import DynamicMacroUpdater
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
+    from ks_ws.sources.macro_calendar import (
+        MacroCalendarGate,
+        default_2026_q2_calendar,
+    )
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.realtime_investor_flow import RealtimeInvestorFlowSource
     from ks_ws.sources.rvol import score_from_rvol
@@ -258,17 +262,27 @@ async def main() -> int:
     triangle_strat = TriangleStrategy(**_PS_KW)
     wedge_strat = WedgeStrategy(**_PS_KW)
 
-    # Wrap entry windows. SELL signals (TP/SL, max_hold timeout, force-close) bypass.
-    breakout_gated = EntryWindowGate(strategy, windows=[BREAKOUT_WINDOW])
-    closing_bet_gated = EntryWindowGate(closing_bet, windows=[CLOSING_BET_WINDOW])
-    # Pattern strategies use same broad window as LiveBreakout (08:00-14:30).
-    db_gated = EntryWindowGate(double_bottom_strat, windows=[BREAKOUT_WINDOW])
-    bb_gated = EntryWindowGate(box_breakout_strat, windows=[BREAKOUT_WINDOW])
-    hns_gated = EntryWindowGate(inverse_hns_strat, windows=[BREAKOUT_WINDOW])
-    fp_gated = EntryWindowGate(flag_pennant_strat, windows=[BREAKOUT_WINDOW])
-    ch_gated = EntryWindowGate(cup_handle_strat, windows=[BREAKOUT_WINDOW])
-    tr_gated = EntryWindowGate(triangle_strat, windows=[BREAKOUT_WINDOW])
-    we_gated = EntryWindowGate(wedge_strat, windows=[BREAKOUT_WINDOW])
+    # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.
+    macro_calendar = default_2026_q2_calendar()
+    log.info("MacroCalendar loaded: %d events (CPI/PPI/FOMC/NFP 2026 Q2 seed)",
+             len(macro_calendar.events()))
+
+    def _gate(inner, window=BREAKOUT_WINDOW):
+        """EntryWindowGate + MacroCalendarGate 이중 래핑. BUY 만 양쪽 모두 통과."""
+        return MacroCalendarGate(
+            EntryWindowGate(inner, windows=[window]),
+            calendar=macro_calendar,
+        )
+
+    breakout_gated = _gate(strategy)
+    closing_bet_gated = _gate(closing_bet, window=CLOSING_BET_WINDOW)
+    db_gated = _gate(double_bottom_strat)
+    bb_gated = _gate(box_breakout_strat)
+    hns_gated = _gate(inverse_hns_strat)
+    fp_gated = _gate(flag_pennant_strat)
+    ch_gated = _gate(cup_handle_strat)
+    tr_gated = _gate(triangle_strat)
+    we_gated = _gate(wedge_strat)
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
