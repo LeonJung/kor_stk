@@ -140,3 +140,44 @@ def test_invalid_winrates_raise() -> None:
 def test_invalid_days_raises() -> None:
     with pytest.raises(ValueError):
         compute_strategy_weights(Path("/tmp/absent.sqlite"), days=0)
+
+
+def test_initial_weights_used_for_insufficient(tmp_path: Path) -> None:
+    db = tmp_path / "trade_review.sqlite"
+    # Seed n=2 trades for breakout (below n_min=5)
+    _seed_trades(db, strategy="breakout", wins=1, losses=1)
+    out = compute_strategy_weights(
+        db, n_min=5,
+        initial_weights={"breakout": 1.2, "wedge": 0.0},
+        strategies=["breakout", "wedge", "closing_bet"],
+    )
+    syms = {w.strategy: w for w in out}
+    assert syms["breakout"].weight == 1.2
+    assert syms["breakout"].reason == "backtest_baseline"
+    assert syms["wedge"].weight == 0.0
+    assert syms["wedge"].reason == "backtest_baseline"
+    assert syms["closing_bet"].weight == 1.0  # no initial → default
+    assert syms["closing_bet"].reason == "insufficient"
+
+
+def test_initial_weights_overridden_when_sufficient_live(tmp_path: Path) -> None:
+    db = tmp_path / "trade_review.sqlite"
+    # n >= 5 live data → live result overrides initial_weights
+    _seed_trades(db, strategy="breakout", wins=8, losses=2)  # 80% win
+    out = compute_strategy_weights(
+        db, initial_weights={"breakout": 0.0},  # backtest said disable
+    )
+    assert out[0].weight == 1.2  # live overrides — high_winrate
+    assert out[0].reason == "high_winrate"
+
+
+def test_manager_initial_weights(tmp_path: Path) -> None:
+    db = tmp_path / "trade_review.sqlite"
+    alloc = _StubAlloc()
+    mgr = StrategyWeightManager(
+        alloc, db, strategies=["breakout", "wedge"],
+        initial_weights={"breakout": 1.2, "wedge": 0.0},
+    )
+    mgr.refresh()
+    assert alloc.weights["breakout"] == 1.2
+    assert alloc.weights["wedge"] == 0.0

@@ -64,12 +64,16 @@ def compute_strategy_weights(
     default_weight: float = 1.0,
     now_utc: datetime | None = None,
     strategies: Sequence[str] | None = None,
+    initial_weights: dict[str, float] | None = None,
 ) -> list[StrategyWeight]:
     """Compute per-strategy weights from review_log within last ``days``.
 
     - ``strategies``: optional list to ensure all strategies are reported
       (even if 0 trades). Strategies not in this list and with 0 rows
       are skipped.
+    - ``initial_weights``: optional baseline weight per strategy (e.g. from
+      backtest 검증). Used when ``n < n_min`` (insufficient live data).
+      Strategy 가 review_log 누적 충분 시 자동으로 live 결과로 override.
     """
     if days <= 0 or n_min <= 0:
         raise ValueError("days and n_min must be positive")
@@ -102,8 +106,12 @@ def compute_strategy_weights(
         losses = int(losses or 0)
         win_rate = wins / n if n > 0 else 0.0
         if n < n_min:
-            weight = default_weight
-            reason = "insufficient"
+            if initial_weights and strategy in initial_weights:
+                weight = initial_weights[strategy]
+                reason = "backtest_baseline"
+            else:
+                weight = default_weight
+                reason = "insufficient"
         elif win_rate >= upper_winrate:
             weight = upper_weight
             reason = "high_winrate"
@@ -123,10 +131,15 @@ def compute_strategy_weights(
     if strategies is not None:
         for s in strategies:
             if s not in seen:
+                if initial_weights and s in initial_weights:
+                    w = initial_weights[s]
+                    reason = "backtest_baseline"
+                else:
+                    w = default_weight
+                    reason = "insufficient"
                 out.append(StrategyWeight(
                     strategy=s, n=0, wins=0, losses=0,
-                    win_rate=0.0, weight=default_weight,
-                    reason="insufficient",
+                    win_rate=0.0, weight=w, reason=reason,
                 ))
     return out
 
@@ -157,28 +170,33 @@ class StrategyWeightManager:
         strategies: Sequence[str] | None = None,
         days: int = 14,
         n_min: int = 5,
+        initial_weights: dict[str, float] | None = None,
     ) -> None:
         self._allocator = allocator
         self._db = Path(db_path)
         self._strategies = list(strategies) if strategies else None
         self.days = days
         self.n_min = n_min
+        self._initial_weights = dict(initial_weights) if initial_weights else None
         self.last_applied: list[StrategyWeight] = []
 
     def refresh(self, *, now_utc: datetime | None = None) -> list[StrategyWeight]:
         weights = compute_strategy_weights(
             self._db, days=self.days, n_min=self.n_min,
             now_utc=now_utc, strategies=self._strategies,
+            initial_weights=self._initial_weights,
         )
         apply_weights(self._allocator, weights)
         self.last_applied = weights
         log.info(
             "StrategyWeightManager: applied %d weights "
-            "(active=%d, weak=%d, disabled=%d, insufficient=%d)",
+            "(live_active=%d, live_weak=%d, live_disabled=%d, "
+            "backtest_baseline=%d, insufficient=%d)",
             len(weights),
             sum(1 for w in weights if w.reason in ("high_winrate", "ok")),
             sum(1 for w in weights if w.reason == "weak"),
             sum(1 for w in weights if w.reason == "disabled"),
+            sum(1 for w in weights if w.reason == "backtest_baseline"),
             sum(1 for w in weights if w.reason == "insufficient"),
         )
         return weights

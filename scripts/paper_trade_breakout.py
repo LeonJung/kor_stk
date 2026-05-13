@@ -545,9 +545,39 @@ async def main() -> int:
         "bnf_disparity", "dual_thrust", "opening_momentum", "foreign_flow",
         "color_streak", "pivot_half_pullback", "tape_burst",
     ]
+    # Backtest baseline (2026-05-14 일봉 696일 + 분봉 30/90/180/400d 결과).
+    # review_log n < 5 시 이 baseline 사용. live 결과 누적 후 자동 override.
+    _BACKTEST_BASELINE = {
+        # 일봉 양호 (역헤드앤숄더 78% / 삼각수렴 71% / 쌍바닥 53% / 깃발 58% /
+        # 웨지 57%) — boost
+        "inverse_head_shoulders": 1.2,
+        "triangle": 1.2,
+        "flag_pennant": 1.2,
+        "wedge": 1.0,
+        "double_bottom": 1.0,
+        # 분봉 양호 (변동성돌파 63% / BNF 54-77% / 피벗 long-term 69%) — boost
+        "volatility_breakout": 1.2,
+        "bnf_disparity": 1.2,
+        "pivot_half_pullback": 1.0,
+        # 마지노선 (양 timeframe 다 loser)
+        "nr7_breakout": 0.0,
+        "color_streak": 0.0,
+        "breakout": 0.5,  # 신고가매매 일봉 50% 분봉 23-31%
+        # 보통 (win 낮지만 +pnl, 또는 데이터 부족)
+        "opening_momentum": 1.0,
+        "dual_thrust": 0.8,
+        "cup_handle": 0.8,
+        "box_breakout": 0.8,
+        "vwap_reversion": 1.0,
+        # 분봉 검증 X (live tick 데이터 부족) — default
+        "closing_bet": 1.0,
+        "foreign_flow": 1.0,
+        "tape_burst": 1.0,
+    }
     weight_mgr = StrategyWeightManager(
         allocator, "data/trade_review.sqlite",
         strategies=_strategy_names, days=14, n_min=5,
+        initial_weights=_BACKTEST_BASELINE,
     )
     weight_mgr.refresh()
     for w in weight_mgr.last_applied:
