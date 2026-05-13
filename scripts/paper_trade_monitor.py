@@ -47,6 +47,9 @@ _STRATEGY_KR = {
     "volatility_breakout": "변동성돌파",
     "vwap_reversion": "VWAP평균회귀",
     "nr7_breakout": "NR7돌파",
+    "bnf_disparity": "BNF이격도",
+    "dual_thrust": "듀얼트러스트",
+    "opening_momentum": "시초모멘텀",
 }
 
 _NAMES = {

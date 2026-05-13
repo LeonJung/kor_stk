@@ -88,10 +88,19 @@ async def main() -> int:
     from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
+    from ks_ws.strategies.bnf_disparity import (
+        BarStoreMA25Provider,
+        BNFDisparityStrategy,
+    )
+    from ks_ws.strategies.dual_thrust import (
+        DualThrustStrategy,
+        compute_dual_thrust_ranges,
+    )
     from ks_ws.strategies.nr7_breakout import (
         NR7BreakoutStrategy,
         compute_nr7_setup,
     )
+    from ks_ws.strategies.opening_momentum import OpeningMomentumStrategy
     from ks_ws.strategies.pattern_strategies import (
         BoxBreakoutStrategy,
         CupHandleStrategy,
@@ -334,6 +343,34 @@ async def main() -> int:
         review_log=review_log,
     )
 
+    # BNF 이격도 — 13th. 분봉 MA25 대비 -15% 이상 이탈 시 BUY.
+    ma25_provider = BarStoreMA25Provider(bar_store, lookback=25, ttl_seconds=300)
+    bnf_strat = BNFDisparityStrategy(
+        ma25_provider=ma25_provider, disparity_pct=15.0,
+        take_profit_pct=5.0, stop_loss_pct=3.0,
+        max_hold_minutes=480, confidence=0.55,
+        review_log=review_log,
+    )
+
+    # 듀얼 트러스트 — 14th. 시가 + k1 * range 돌파 BUY.
+    dt_ranges = compute_dual_thrust_ranges(bar_store, codes, lookback=5)
+    log.info("DualThrust ranges computed for %d/%d symbols", len(dt_ranges), len(codes))
+    dual_thrust_strat = DualThrustStrategy(
+        ranges=dt_ranges, k1=0.5, k2=0.5,
+        take_profit_pct=3.0, stop_loss_pct=2.0,
+        max_hold_minutes=360, confidence=0.6,
+        review_log=review_log,
+    )
+
+    # 시초 모멘텀 — 15th. 09:03-09:25 시초가 +5% 강한 갭 + 거래량 spike.
+    # NOTE: 책 strategy G 의 핵심 = 09:50 force_exit (time-based 단타).
+    # 다른 strategy 들의 no_force_close 룰과 다름 — 이 strategy 만 예외.
+    opening_strat = OpeningMomentumStrategy(
+        watchlist=set(codes),
+        surge_pct=5.0, take_profit_pct=3.0,
+        review_log=review_log,
+    )
+
     # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.
     macro_calendar = default_2026_q2_calendar()
     log.info("MacroCalendar loaded: %d events (CPI/PPI/FOMC/NFP 2026 Q2 seed)",
@@ -358,6 +395,11 @@ async def main() -> int:
     vb_gated = _gate(vol_breakout_strat)
     vwap_gated = _gate(vwap_strat)
     nr7_gated = _gate(nr7_strat)
+    bnf_gated = _gate(bnf_strat)
+    dt_gated = _gate(dual_thrust_strat)
+    # 시초 모멘텀은 09:03-09:25 그 자체가 entry window — 외부 EntryWindowGate
+    # 와 strategy 의 entry_window_kst 가 중복 wrap 되어도 OK (둘 다 09:03-09:25 통과).
+    opening_gated = _gate(opening_strat)
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -450,7 +492,7 @@ async def main() -> int:
         bus,
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
          fp_gated, ch_gated, tr_gated, we_gated, vb_gated, vwap_gated,
-         nr7_gated],
+         nr7_gated, bnf_gated, dt_gated, opening_gated],
         allocator,
     )
     runtime.setup()
