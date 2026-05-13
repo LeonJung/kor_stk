@@ -61,6 +61,9 @@ async def main() -> int:
     from ks_ws.storage.bars import BarStore
     from ks_ws.storage.ledger import Ledger
     from ks_ws.storage.universe import UniverseRegistry
+    from ks_ws.detectors.box_breakout import BoxBreakoutDetector
+    from ks_ws.detectors.double_bottom import DoubleBottomDetector
+    from ks_ws.detectors.head_shoulders import HeadShouldersDetector
     from ks_ws.sources.foreign_flow import kis_foreign_flow_fetcher
     from ks_ws.sources.macro_score import blend_macro_scores
     from ks_ws.sources.rvol import score_from_rvol
@@ -72,6 +75,11 @@ async def main() -> int:
     )
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
+    from ks_ws.strategies.pattern_strategies import (
+        BoxBreakoutStrategy,
+        DoubleBottomStrategy,
+        InverseHeadShouldersStrategy,
+    )
     from ks_ws.events import DojiCandle
 
     settings = get_settings()
@@ -216,9 +224,24 @@ async def main() -> int:
         stop_loss_pct=3.0,
         confidence=0.5,
     )
+    # Pattern strategies — fed by detectors using BarStore daily history.
+    double_bottom_strat = DoubleBottomStrategy(
+        take_profit_pct=3.0, stop_loss_pct=2.0, max_hold_minutes=240, confidence=0.6,
+    )
+    box_breakout_strat = BoxBreakoutStrategy(
+        take_profit_pct=3.0, stop_loss_pct=2.0, max_hold_minutes=240, confidence=0.6,
+    )
+    inverse_hns_strat = InverseHeadShouldersStrategy(
+        take_profit_pct=3.0, stop_loss_pct=2.0, max_hold_minutes=240, confidence=0.6,
+    )
+
     # Wrap entry windows. SELL signals (TP/SL, max_hold timeout, force-close) bypass.
     breakout_gated = EntryWindowGate(strategy, windows=[BREAKOUT_WINDOW])
     closing_bet_gated = EntryWindowGate(closing_bet, windows=[CLOSING_BET_WINDOW])
+    # Pattern strategies use same broad window as LiveBreakout (08:00-14:30).
+    db_gated = EntryWindowGate(double_bottom_strat, windows=[BREAKOUT_WINDOW])
+    bb_gated = EntryWindowGate(box_breakout_strat, windows=[BREAKOUT_WINDOW])
+    hns_gated = EntryWindowGate(inverse_hns_strat, windows=[BREAKOUT_WINDOW])
 
     # FundamentalAllocator: BUY signals subject to per-symbol macro_score.
     # 시작 시 RVOL (BarStore 일봉) + 외인 순매수 (KIS investor-trade-by-stock-daily,
@@ -272,9 +295,57 @@ async def main() -> int:
         )
     log.info("Set macro_score for %d/%d symbols (min_score=0.5 BUY veto)", macro_set, len(codes))
 
-    runtime = Runtime(bus, [breakout_gated, closing_bet_gated], allocator)
+    # Construct Runtime first so its EventBus subscriptions exist BEFORE pattern
+    # detectors publish historical-pattern events; otherwise startup-time events
+    # would have no receiver and be dropped.
+    runtime = Runtime(
+        bus,
+        [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated],
+        allocator,
+    )
+    runtime.setup()
     log.info("Strategy entry windows (KST): breakout %s-%s, closing_bet %s-%s",
              *BREAKOUT_WINDOW, *CLOSING_BET_WINDOW)
+
+    # --- Pattern detectors: feed BarStore 일봉 → emit events at startup ---
+    # 두 어댑테이션:
+    # (1) per-symbol unique — 같은 종목 첫 event 만 publish (detector hysteresis
+    #     가 약해 다수 emit 하는 경우 strategy 가 어차피 same-day guard 로 skip;
+    #     bus subscription queue 절약).
+    # (2) timestamp override → datetime.now(UTC). event 가 historical bar 시각으로
+    #     emit 되면 EntryWindowGate 가 어제/그제 시각으로 차단. paper_trade
+    #     startup 시 fed 된 패턴 = "최근 패턴이 오늘 시작 시점에 fire" 의미로 변환.
+    emitted_per_kind: dict[str, set[str]] = {}
+
+    def _make_pattern_publisher(kind: str):
+        emitted_per_kind.setdefault(kind, set())
+        def pub(ev):
+            if ev.symbol in emitted_per_kind[kind]:
+                return
+            emitted_per_kind[kind].add(ev.symbol)
+            data = ev.model_dump()
+            data["timestamp"] = datetime.now(UTC)
+            bus.publish(type(ev)(**data))
+        return pub
+
+    db_det = DoubleBottomDetector(bus, publish=_make_pattern_publisher("double_bottom"))
+    bb_det = BoxBreakoutDetector(bus, publish=_make_pattern_publisher("box_breakout"))
+    hns_det = HeadShouldersDetector(bus, publish=_make_pattern_publisher("inverse_hns"))
+    for sym in codes:
+        sym_bars = list(bar_store.read(sym, "1d"))
+        if len(sym_bars) < 30:
+            continue
+        for bar in sym_bars:
+            db_det.feed(bar)
+            bb_det.feed(bar)
+            hns_det.feed(bar)
+    log.info(
+        "Pattern detectors published: double_bottom=%d symbols, "
+        "box_breakout=%d, inverse_hns=%d",
+        len(emitted_per_kind.get("double_bottom", set())),
+        len(emitted_per_kind.get("box_breakout", set())),
+        len(emitted_per_kind.get("inverse_hns", set())),
+    )
 
     # --- Doji emitter (for closing_bet) ---
     # 13:30 이후 매 분, 각 종목의 그날 partial OHLC 로 도지 검사 → DojiCandle publish

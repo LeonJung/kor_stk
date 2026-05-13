@@ -73,6 +73,8 @@ def detect_inverse_head_shoulders(
     # head = window 안 최저 low
     head_idx = min(range(n), key=lambda i: window[i].low)
     head_low = window[head_idx].low
+    if head_low <= 0:
+        return None  # corrupt or unset bar data
 
     if head_idx < min_gap_bars or head_idx > n - min_gap_bars - 2:
         return None  # head too close to edges

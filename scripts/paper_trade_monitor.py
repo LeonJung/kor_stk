@@ -37,6 +37,9 @@ _STRATEGY_KR = {
     "pair_follow": "짝꿍매매",
     "scalping": "스캘핑",
     "limit_up": "상따",
+    "double_bottom": "쌍바닥매매",
+    "box_breakout": "박스권돌파매매",
+    "inverse_head_shoulders": "역헤드앤숄더매매",
 }
 
 _NAMES = {
