@@ -666,18 +666,24 @@ async def main() -> int:
     ch_det = CupHandleDetector(bus, publish=_make_pattern_publisher("cup_handle"))
     tr_det = TriangleDetector(bus, publish=_make_pattern_publisher("triangle"))
     we_det = WedgeDetector(bus, publish=_make_pattern_publisher("wedge"))
-    for sym in codes:
-        sym_bars = list(bar_store.read(sym, "1d"))
-        if len(sym_bars) < 30:
-            continue
-        for bar in sym_bars:
-            db_det.feed(bar)
-            bb_det.feed(bar)
-            hns_det.feed(bar)
-            fp_det.feed(bar)
-            ch_det.feed(bar)
-            tr_det.feed(bar)
-            we_det.feed(bar)
+    # 2026-05-14 버그 수정: historical pre-feed 가 entry_price=옛날 종가 + exit
+    # =오늘 tick 가 instant TP trigger → fake +pnl 폭발 (5/14 1232 reviews 중 95
+    # fake). pre-feed 비활성. live 진행 중 일봉 detector 가 fire 안 함 (다음날
+    # 일봉 추가될 때까지) — 패턴 strategies 사실상 idle. 적절 해결책은 분봉 detector
+    # 도입 (TODO).
+    # for sym in codes:
+    #     sym_bars = list(bar_store.read(sym, "1d"))
+    #     if len(sym_bars) < 30:
+    #         continue
+    #     for bar in sym_bars:
+    #         db_det.feed(bar)
+    #         bb_det.feed(bar)
+    #         hns_det.feed(bar)
+    #         fp_det.feed(bar)
+    #         ch_det.feed(bar)
+    #         tr_det.feed(bar)
+    #         we_det.feed(bar)
+    _ = (db_det, bb_det, hns_det, fp_det, ch_det, tr_det, we_det)  # silence unused
     log.info(
         "Pattern detectors published: db=%d bb=%d hns=%d fp=%d ch=%d tr=%d we=%d symbols",
         len(emitted_per_kind.get("double_bottom", set())),
