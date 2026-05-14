@@ -26,6 +26,8 @@ $MARKER_START
 50 7 * * 1-5 cd $REPO_DIR && $PYTHONPATH_PREFIX $PYTHON -m scripts.paper_trade_breakout >> $REPORTS_DIR/paper_trade_\$(date +\\%Y\\%m\\%d).log 2>&1
 # Daily report — 평일 20:30 KST (paper_trade 종료 직후).
 30 20 * * 1-5 cd $REPO_DIR && $PYTHONPATH_PREFIX $PYTHON -m scripts.daily_report > $REPORTS_DIR/daily_\$(date +\\%Y\\%m\\%d).txt 2>&1
+# Trade history append — 평일 20:35 KST (daily_report 직후, trade_history.md 누적).
+35 20 * * 1-5 cd $REPO_DIR && $PYTHONPATH_PREFIX $PYTHON -m scripts.append_trade_history 2>&1 | tee -a $REPORTS_DIR/trade_history_cron.log
 # Weekly backtest — 토요일 08:30 KST.
 30 8 * * 6 cd $REPO_DIR && $PYTHONPATH_PREFIX $PYTHON -m scripts.weekly_backtest > $REPORTS_DIR/backtest_\$(date +\\%Y\\%m\\%d).txt 2>&1
 # Weekly report — 토요일 09:00 KST (backtest 끝난 후).
