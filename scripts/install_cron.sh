@@ -30,6 +30,8 @@ $MARKER_START
 30 8 * * 6 cd $REPO_DIR && $PYTHONPATH_PREFIX $PYTHON -m scripts.weekly_backtest > $REPORTS_DIR/backtest_\$(date +\\%Y\\%m\\%d).txt 2>&1
 # Weekly report — 토요일 09:00 KST (backtest 끝난 후).
 0 9 * * 6 cd $REPO_DIR && $PYTHONPATH_PREFIX $PYTHON -m scripts.weekly_report > $REPORTS_DIR/weekly_\$(date +\\%Y\\%m\\%d).txt 2>&1
+# Daily backup — 매일 03:00 KST. trade_review + ledger + universe_candidates.
+0 3 * * * cd $REPO_DIR && mkdir -p data/backups && for f in data/trade_review.sqlite data/paper_breakout_ledger.sqlite data/universe_candidates.sqlite; do [ -f \"\$f\" ] && cp -a \"\$f\" data/backups/\$(basename \"\$f\" .sqlite)_\$(date +\\%Y\\%m\\%d).sqlite; done
 $MARKER_END
 EOF
 }

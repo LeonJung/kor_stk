@@ -331,6 +331,24 @@ async def main() -> int:
 
     # TradeReviewLog — 사용자 명시 (2026-05-13): strategy 청산 시점 회고 누적.
     # 모든 strategy (8개) 가 TP/SL/timeout 청산 시 record() 호출 → SQLite 영구 저장.
+    # Auto-backup trade_review + ledger 시작 시 (매매 기록 손실 방지).
+    # 2026-05-14 09:00 사용자 명시: paper_trade 매매 기록 누락 방지 조치.
+    import shutil as _shutil
+    _backup_dir = Path("data/backups")
+    _backup_dir.mkdir(parents=True, exist_ok=True)
+    _ts = datetime.now(_KST).strftime("%Y%m%d_%H%M%S")
+    for _src in ("data/trade_review.sqlite", "data/paper_breakout_ledger.sqlite",
+                 "data/universe_candidates.sqlite"):
+        _p = Path(_src)
+        if _p.exists():
+            _dst = _backup_dir / f"{_p.stem}_{_ts}{_p.suffix}"
+            try:
+                _shutil.copy2(_p, _dst)
+                log.info("Backup created: %s → %s (%d bytes)",
+                         _src, _dst.name, _dst.stat().st_size)
+            except Exception as _e:
+                log.warning("Backup failed for %s: %s", _src, _e)
+
     review_log = TradeReviewLog("data/trade_review.sqlite")
     log.info("TradeReviewLog opened: data/trade_review.sqlite (%d existing rows)", len(review_log))
 
@@ -628,8 +646,11 @@ async def main() -> int:
     # would have no receiver and be dropped.
     runtime = Runtime(
         bus,
+        # 2026-05-14 09:08 vwap_gated 제외: same-day single entry 없는
+        # strategy 라 over-trade. 3분 만에 33K trade 발생. 추후 strategy
+        # 자체에 same-day guard 추가 후 부활.
         [breakout_gated, closing_bet_gated, db_gated, bb_gated, hns_gated,
-         fp_gated, ch_gated, tr_gated, we_gated, vb_gated, vwap_gated,
+         fp_gated, ch_gated, tr_gated, we_gated, vb_gated,
          nr7_gated, bnf_gated, dt_gated, opening_gated, ff_gated,
          cs_gated, pp_gated, tb_gated],
         allocator,
