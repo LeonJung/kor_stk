@@ -112,12 +112,14 @@ class BarStoreATRProvider:
         return snap
 
 
-# Style multipliers (사용자 명시 2026-05-14):
+# Style multipliers (사용자 확정 2026-05-15).
+# KOSPI top 종목 일봉 ATR ~5% 기준 재조정. 기존 4/2 → 2/1 (스윙 기준).
+# ATR 자체가 크므로 multiplier 절감해야 사용자 doc 의 TP/SL 범위 부합.
 ATR_MULTIPLIERS = {
-    "scalping": {"tp": 1.0, "sl": 0.5},
-    "day_trade": {"tp": 2.0, "sl": 1.0},
-    "swing": {"tp": 4.0, "sl": 2.0},
-    "mid_term": {"tp": 8.0, "sl": 3.0},
+    "scalping": {"tp": 0.3, "sl": 0.15},
+    "day_trade": {"tp": 0.5, "sl": 0.3},
+    "swing": {"tp": 2.0, "sl": 1.0},
+    "mid_term": {"tp": 5.0, "sl": 2.0},
     # long_term = 별도 (단계별 trailing 100%+)
 }
 

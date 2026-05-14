@@ -84,18 +84,19 @@ def test_provider_missing_data(tmp_path: Path) -> None:
 
 
 def test_compute_tp_sl_swing() -> None:
-    # entry 285000, ATR 5000, style swing
+    # entry 285000, ATR 5000, style swing (mult tp=2.0 sl=1.0)
     tp, sl = compute_tp_sl(285000, 5000.0, "swing")
-    # TP = entry + 4 x ATR = 305000, SL = entry - 2 x ATR = 275000
-    assert tp == 305000
-    assert sl == 275000
+    # TP = entry + 2 x ATR = 295000, SL = entry - 1 x ATR = 280000
+    assert tp == 295000
+    assert sl == 280000
 
 
 def test_compute_tp_sl_scalping() -> None:
+    # mult tp=0.3 sl=0.15
     tp, sl = compute_tp_sl(100000, 500.0, "scalping")
-    # TP = 100000 + 1 x 500 = 100500, SL = 100000 - 0.5 x 500 = 99750
-    assert tp == 100500
-    assert sl == 99750
+    # TP = 100000 + 0.3 x 500 = 100150, SL = 100000 - 0.15 x 500 = 99925
+    assert tp == 100150
+    assert sl == 99925
 
 
 def test_compute_tp_sl_fallback() -> None:
@@ -113,9 +114,9 @@ def test_compute_tp_sl_unknown_style() -> None:
 
 def test_compute_tp_sl_pct_swing() -> None:
     tp_pct, sl_pct = compute_tp_sl_pct(2.0, "swing")
-    # atr_pct 2.0 x swing(tp 4 / sl 2) = (8.0%, 4.0%)
-    assert tp_pct == 8.0
-    assert sl_pct == 4.0
+    # atr_pct 2.0 x swing(tp 2 / sl 1) = (4.0%, 2.0%)
+    assert tp_pct == 4.0
+    assert sl_pct == 2.0
 
 
 def test_atr_multipliers_keys() -> None:
