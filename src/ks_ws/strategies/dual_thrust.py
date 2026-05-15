@@ -35,6 +35,8 @@ class _Pos:
     entry_time: datetime
     buy_trigger: int
     sell_trigger: int
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 def compute_dual_thrust_range(bars: Sequence[Bar]) -> int:
@@ -49,6 +51,7 @@ def compute_dual_thrust_range(bars: Sequence[Bar]) -> int:
 
 class DualThrustStrategy(Strategy):
     name = "dual_thrust"
+    style = "day_trade"  # 사용자 룰 (2026-05-15)
 
     def __init__(
         self,
@@ -58,9 +61,10 @@ class DualThrustStrategy(Strategy):
         k2: float = 0.5,
         take_profit_pct: float = 3.0,
         stop_loss_pct: float = 2.0,
-        max_hold_minutes: int = 360,
+        max_hold_minutes: int = 240,
         confidence: float = 0.6,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if not 0 < k1 < 2 or not 0 < k2 < 2:
             raise ValueError("k1, k2 must be in (0, 2)")
@@ -76,6 +80,7 @@ class DualThrustStrategy(Strategy):
         self.max_hold = timedelta(minutes=max_hold_minutes)
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._open: dict[str, _Pos] = {}
         self._day_open: dict[str, tuple[object, int]] = {}
         self._was_above: dict[str, tuple[object, bool]] = {}
@@ -115,8 +120,8 @@ class DualThrustStrategy(Strategy):
         # Exit
         pos = self._open.get(tick.symbol)
         if pos is not None:
-            tp = pos.entry * (1 + self.take_profit_pct / 100)
-            sl = pos.entry * (1 - self.stop_loss_pct / 100)
+            tp = pos.tp_price if pos.tp_price is not None else pos.entry * (1 + self.take_profit_pct / 100)
+            sl = pos.sl_price if pos.sl_price is not None else pos.entry * (1 - self.stop_loss_pct / 100)
             # Exit on sell_trigger (downside breakout) 도 SELL 가능
             if tick.price < pos.sell_trigger:
                 del self._open[tick.symbol]
@@ -155,9 +160,17 @@ class DualThrustStrategy(Strategy):
             return []
         sell_trig = int(day_open - self.k2 * rng)
         self._entered_today.add(day_key)
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
         self._open[tick.symbol] = _Pos(
             entry=tick.price, entry_time=tick.timestamp,
             buy_trigger=buy_trig, sell_trigger=sell_trig,
+            tp_price=tp_price, sl_price=sl_price,
         )
         return [Signal(
             symbol=tick.symbol, side=Side.BUY, confidence=self.confidence,

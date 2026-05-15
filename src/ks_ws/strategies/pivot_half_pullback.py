@@ -54,6 +54,8 @@ class _Pos:
     entry: int
     entry_time: datetime
     pivot: PivotLevels
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 @dataclass
@@ -66,6 +68,7 @@ class _DayState:
 
 class PivotHalfPullbackStrategy(Strategy):
     name = "pivot_half_pullback"
+    style = "day_trade"  # 사용자 룰 (2026-05-15)
 
     def __init__(
         self,
@@ -77,6 +80,7 @@ class PivotHalfPullbackStrategy(Strategy):
         r1_proximity_pct: float = 1.0,  # R1 의 1% 안까지 도달해야 setup
         confidence: float = 0.6,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("pct must be positive")
@@ -91,6 +95,7 @@ class PivotHalfPullbackStrategy(Strategy):
         self.r1_proximity_pct = r1_proximity_pct
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._open: dict[str, _Pos] = {}
         self._day: dict[str, _DayState] = {}
         self._was_above_half: dict[str, bool] = {}
@@ -134,10 +139,10 @@ class PivotHalfPullbackStrategy(Strategy):
         # Exit
         pos = self._open.get(tick.symbol)
         if pos is not None:
-            tp = pos.entry * (1 + self.take_profit_pct / 100)
+            tp = pos.tp_price if pos.tp_price is not None else pos.entry * (1 + self.take_profit_pct / 100)
             sl_pivot = pos.pivot.p  # pivot 이탈 = SL
-            sl_pct_floor = pos.entry * (1 - self.stop_loss_pct / 100)
-            sl = max(sl_pivot, sl_pct_floor)
+            sl_atr = pos.sl_price if pos.sl_price is not None else pos.entry * (1 - self.stop_loss_pct / 100)
+            sl = max(sl_pivot, sl_atr)
             if tick.price >= levels.r1 or tick.price >= tp:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="TP",
@@ -173,8 +178,16 @@ class PivotHalfPullbackStrategy(Strategy):
         if day_key in self._entered_today:
             return []
         self._entered_today.add(day_key)
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
         self._open[tick.symbol] = _Pos(
             entry=tick.price, entry_time=tick.timestamp, pivot=levels,
+            tp_price=tp_price, sl_price=sl_price,
         )
         return [Signal(
             symbol=tick.symbol, side=Side.BUY, confidence=self.confidence,

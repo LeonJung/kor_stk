@@ -33,6 +33,8 @@ class _Position:
     entry_price: int
     entry_time: datetime
     open_price: int  # 시초가 reference
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 @dataclass
@@ -43,22 +45,25 @@ class _SymbolMeta:
 
 class OpeningMomentumStrategy(Strategy):
     name = "opening_momentum"
+    style = "scalping"  # 사용자 룰 (2026-05-15) — 스캘핑 ≤15min
 
     def __init__(
         self,
         *,
         watchlist: set[str],
         surge_pct: float = 5.0,
-        take_profit_pct: float = 3.0,
+        take_profit_pct: float = 1.5,
+        stop_loss_pct: float = 0.8,
         entry_window_kst: tuple[time, time] = (time(9, 3), time(9, 25)),
         force_exit_kst: time = time(9, 50),
         confidence: float = 0.6,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if not watchlist:
             raise ValueError("watchlist must not be empty")
-        if surge_pct <= 0 or take_profit_pct <= 0:
-            raise ValueError("surge_pct and take_profit_pct must be positive")
+        if surge_pct <= 0 or take_profit_pct <= 0 or stop_loss_pct <= 0:
+            raise ValueError("surge_pct, take_profit_pct, stop_loss_pct must be positive")
         if not 0 < confidence <= 1:
             raise ValueError("confidence must be in (0, 1]")
         if entry_window_kst[0] >= entry_window_kst[1]:
@@ -66,10 +71,12 @@ class OpeningMomentumStrategy(Strategy):
         self.watchlist = set(watchlist)
         self.surge_pct = surge_pct
         self.take_profit_pct = take_profit_pct
+        self.stop_loss_pct = stop_loss_pct
         self.entry_window_kst = entry_window_kst
         self.force_exit_kst = force_exit_kst
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._meta: dict[str, _SymbolMeta] = {}  # opening price snapshot per symbol
         self._open: dict[str, _Position] = {}  # current positions
 
@@ -115,11 +122,20 @@ class OpeningMomentumStrategy(Strategy):
         if surge_pct < self.surge_pct:
             return []
         # Open a position; record entry price = current tick price
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
         self._open[tick.symbol] = _Position(
             symbol=tick.symbol,
             entry_price=tick.price,
             entry_time=tick.timestamp,
             open_price=meta.open_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
         )
         return [
             Signal(
@@ -133,15 +149,18 @@ class OpeningMomentumStrategy(Strategy):
         ]
 
     def _maybe_exit(self, tick: Tick, pos: _Position) -> list[Signal]:
-        # Take-profit
-        tp_price = pos.entry_price * (1 + self.take_profit_pct / 100)
+        # Take-profit (ATR-based if available)
+        tp_price = pos.tp_price if pos.tp_price is not None else pos.entry_price * (1 + self.take_profit_pct / 100)
         if tick.price >= tp_price:
             del self._open[tick.symbol]
             self._record_review(pos, tick, exit_reason="TP",
                                 exit_note=f"TP @ {tick.price}")
             return [self._exit(tick, note=f"take-profit @ {tick.price}")]
-        # Stop-loss = entry price exact hit (사용자 B-6 결정)
-        if tick.price <= pos.entry_price:
+        # Stop-loss = entry price exact hit (사용자 B-6 결정).
+        # ATR SL 도 같이 검사 — 더 보수적 (높은 가격) 인 쪽으로 SELL 자동.
+        sl_atr = pos.sl_price if pos.sl_price is not None else pos.entry_price * (1 - self.stop_loss_pct / 100)
+        sl = max(pos.entry_price, sl_atr)
+        if tick.price <= sl:
             del self._open[tick.symbol]
             self._record_review(pos, tick, exit_reason="SL",
                                 exit_note=f"entry hit @ {tick.price}")

@@ -35,10 +35,13 @@ _KST = ZoneInfo("Asia/Seoul")
 class _Pos:
     entry: int
     entry_time: datetime
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 class NR7BreakoutStrategy(Strategy):
     name = "nr7_breakout"
+    style = "day_trade"  # 사용자 룰 (2026-05-15)
 
     def __init__(
         self,
@@ -46,10 +49,11 @@ class NR7BreakoutStrategy(Strategy):
         setup: dict[str, tuple[int, bool]],  # symbol → (prev_high, is_nr7)
         take_profit_pct: float = 3.0,
         stop_loss_pct: float = 2.0,
-        max_hold_minutes: int = 360,
+        max_hold_minutes: int = 240,
         confidence: float = 0.6,
         timeout_at_kst: time = time(15, 25),
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("pct must be positive")
@@ -62,6 +66,7 @@ class NR7BreakoutStrategy(Strategy):
         self.confidence = confidence
         self.timeout_at_kst = timeout_at_kst
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._open: dict[str, _Pos] = {}
         self._was_above: dict[str, tuple[object, bool]] = {}
         self._entered_today: set[tuple[str, object]] = set()
@@ -93,8 +98,8 @@ class NR7BreakoutStrategy(Strategy):
         # Exit
         pos = self._open.get(tick.symbol)
         if pos is not None:
-            tp = pos.entry * (1 + self.take_profit_pct / 100)
-            sl = pos.entry * (1 - self.stop_loss_pct / 100)
+            tp = pos.tp_price if pos.tp_price is not None else pos.entry * (1 + self.take_profit_pct / 100)
+            sl = pos.sl_price if pos.sl_price is not None else pos.entry * (1 - self.stop_loss_pct / 100)
             if tick.price >= tp:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="TP",
@@ -136,11 +141,21 @@ class NR7BreakoutStrategy(Strategy):
         if day_key in self._entered_today:
             return []
         self._entered_today.add(day_key)
-        self._open[tick.symbol] = _Pos(entry=tick.price, entry_time=tick.timestamp)
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
+        self._open[tick.symbol] = _Pos(
+            entry=tick.price, entry_time=tick.timestamp,
+            tp_price=tp_price, sl_price=sl_price,
+        )
         return [Signal(
             symbol=tick.symbol, side=Side.BUY, confidence=self.confidence,
             strategy=self.name, timestamp=tick.timestamp,
-            note=f"nr7_brk: prev_high={prev_high} @ {tick.price}",
+            note=f"nr7_brk: prev_high={prev_high} @ {tick.price} TP={tp_price} SL={sl_price}",
         )]
 
     def _sig(self, tick: Tick, side: Side, *, note: str,

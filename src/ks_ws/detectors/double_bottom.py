@@ -94,6 +94,8 @@ def detect_double_bottom(
             if neckline <= max(low1, low2):
                 continue
             min_low = min(low1, low2)
+            if min_low <= 0:
+                continue
             rise_pct = (neckline - min_low) / min_low * 100
             if rise_pct < neckline_min_rise_pct:
                 continue

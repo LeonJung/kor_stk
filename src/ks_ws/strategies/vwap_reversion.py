@@ -65,10 +65,13 @@ class _Position:
     entry_price: int
     entry_time: datetime
     side: Side  # always BUY in V1 (mean reversion long-only)
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 class VWAPMeanReversionStrategy(Strategy):
     name = "vwap_reversion"
+    style = "scalping"  # 사용자 룰 (2026-05-15) — 스캘핑 ≤15min
 
     def __init__(
         self,
@@ -78,8 +81,11 @@ class VWAPMeanReversionStrategy(Strategy):
         stop_sigma: float = 2.5,
         volume_spike_multiplier: float = 3.0,
         volume_window_seconds: int = 300,
+        take_profit_pct: float = 1.0,
+        stop_loss_pct: float = 0.6,
         confidence: float = 0.5,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if entry_sigma <= 0 or stop_sigma <= entry_sigma:
             raise ValueError("stop_sigma must exceed entry_sigma > 0")
@@ -87,13 +93,18 @@ class VWAPMeanReversionStrategy(Strategy):
             raise ValueError("volume_spike_multiplier must be >= 1")
         if not 0 < confidence <= 1:
             raise ValueError("confidence must be in (0, 1]")
+        if take_profit_pct <= 0 or stop_loss_pct <= 0:
+            raise ValueError("take_profit_pct and stop_loss_pct must be positive")
         self.watchlist = set(watchlist) if watchlist else None
         self.entry_sigma = entry_sigma
         self.stop_sigma = stop_sigma
         self.volume_spike_multiplier = volume_spike_multiplier
         self.volume_window = timedelta(seconds=volume_window_seconds)
+        self.take_profit_pct = take_profit_pct
+        self.stop_loss_pct = stop_loss_pct
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._state: dict[str, _SymbolState] = {}
         self._open: dict[str, _Position] = {}
         self._baseline_volume: dict[str, float] = {}
@@ -143,12 +154,21 @@ class VWAPMeanReversionStrategy(Strategy):
         if recent_v < baseline * self.volume_spike_multiplier:
             return []
 
-        # Enter
+        # Enter — ATR backstop TP/SL (외에 VWAP/σ exit 우선)
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
         self._open[tick.symbol] = _Position(
             symbol=tick.symbol,
             entry_price=tick.price,
             entry_time=tick.timestamp,
             side=Side.BUY,
+            tp_price=tp_price,
+            sl_price=sl_price,
         )
         return [
             Signal(
@@ -162,6 +182,26 @@ class VWAPMeanReversionStrategy(Strategy):
         ]
 
     def _maybe_exit(self, tick: Tick, pos: _Position, state: _SymbolState) -> list[Signal]:
+        # ATR backstop — fire if hit before VWAP/σ logic.
+        if pos.tp_price is not None and tick.price >= pos.tp_price:
+            del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="TP",
+                                exit_note=f"ATR TP @ {tick.price}")
+            return [Signal(
+                symbol=tick.symbol, side=Side.SELL, confidence=1.0,
+                strategy=self.name, timestamp=tick.timestamp,
+                note=f"vwap ATR TP @ {tick.price}",
+            )]
+        if pos.sl_price is not None and tick.price <= pos.sl_price:
+            del self._open[tick.symbol]
+            self._record_review(pos, tick, exit_reason="SL",
+                                exit_note=f"ATR SL @ {tick.price}")
+            return [Signal(
+                symbol=tick.symbol, side=Side.SELL, confidence=1.0,
+                urgency="high",  # type: ignore[arg-type]
+                strategy=self.name, timestamp=tick.timestamp,
+                note=f"vwap ATR SL @ {tick.price}",
+            )]
         # Take profit when price returns to (or above) VWAP
         if tick.price >= state.vwap:
             del self._open[tick.symbol]

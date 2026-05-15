@@ -198,12 +198,24 @@
 
 ## 적용 계획 (사용자 검토 후)
 
-### Phase A: 코드 수정 (스윙 strategies 우선)
-1. 패턴 strategies 의 `_PS_KW` max_hold_minutes 240 → 5-10일
-2. 패턴 strategies TP/SL 8-12% / 4-6%
-3. 외국인수급 hold 20-90일 + TP 20% / SL 8%
-4. 스캘핑 strategies TP/SL 더 타이트
-5. opening_momentum force_exit 09:50 → 09:25 (50분 → 15분)
+### Phase A: 코드 수정 (스윙 strategies 우선) — ✅ 2026-05-15 완료
+1. ✅ 패턴 strategies hold 5-10일 + ATR swing multiplier (atr_swing 주입)
+2. ✅ 패턴 strategies fallback TP/SL 8%/4% (ATR 우선, fallback)
+3. ✅ 외국인수급 hold 30일 + TP 20% / SL 8% + atr_mid 주입 (style="mid_term")
+4. ✅ 스캘핑 strategies (vwap/opening/tape_burst) atr_scalping 주입 + style="scalping"
+5. ⏳ opening_momentum force_exit 09:50 → 09:25 (50분 → 15분) — 후속
+
+### Phase A.5: ATR 동적 TP/SL 전체 적용 — ✅ 2026-05-15 완료
+- 모든 19 strategies 가 atr_provider 받음 (None fallback = hard-coded pct)
+- ATR 우선, ATR=0 또는 unavailable 시 fallback pct 사용
+- BNF=day_trade (doc 분류대로), 6 단타 + 8 스윙 + 1 중기 + 3 스캘핑
+- paper_trade_breakout.py 가 4 ATR providers (1m/5m/15m/1d) 구성 후 strategy 별 주입
+
+### Phase A.6: 장기 trailing framework — ✅ 2026-05-15 완료
+- `_long_term_trailing.LongTermTrailingState` 단계별 anchor ratchet 구현
+- 100%/200%/.../ N×entry 도달 = anchor 갱신, anchor -20% trailing
+- anchor 미활성 시 entry -20% SL
+- 장기 strategies (TODO, LLM 필요) 가 사용. 8 테스트 통과.
 
 ### Phase B: 15분봉 데이터 확보
 - 현재 BarStore 의 1m 만 보유 (190K bars/sym × 1년)

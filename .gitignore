@@ -57,3 +57,5 @@ daishin_creds.txt
 
 # Local IDE / temp
 *.local.json
+trade_history.md
+reliability_report.md

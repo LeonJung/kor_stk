@@ -32,10 +32,13 @@ class _Pos:
     entry: int
     entry_time: datetime
     streak_n: int
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 class ColorStreakStrategy(Strategy):
     name = "color_streak"
+    style = "swing"  # 사용자 룰 (2026-05-15)
 
     def __init__(
         self,
@@ -43,9 +46,10 @@ class ColorStreakStrategy(Strategy):
         setup: dict[str, tuple[int, int]],  # symbol → (prev_close, streak_n)
         take_profit_pct: float = 3.0,
         stop_loss_pct: float = 2.0,
-        max_hold_minutes: int = 360,
+        max_hold_minutes: int | None = None,
         confidence: float = 0.6,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("pct must be positive")
@@ -54,9 +58,13 @@ class ColorStreakStrategy(Strategy):
         self.setup = dict(setup)
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
+        # default 스윙 3일 (사용자 doc)
+        if max_hold_minutes is None:
+            max_hold_minutes = 3 * 24 * 60
         self.max_hold = timedelta(minutes=max_hold_minutes)
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._open: dict[str, _Pos] = {}
         self._was_above: dict[str, tuple[object, bool]] = {}
         self._entered_today: set[tuple[str, object]] = set()
@@ -84,8 +92,8 @@ class ColorStreakStrategy(Strategy):
         # Exit
         pos = self._open.get(tick.symbol)
         if pos is not None:
-            tp = pos.entry * (1 + self.take_profit_pct / 100)
-            sl = pos.entry * (1 - self.stop_loss_pct / 100)
+            tp = pos.tp_price if pos.tp_price is not None else pos.entry * (1 + self.take_profit_pct / 100)
+            sl = pos.sl_price if pos.sl_price is not None else pos.entry * (1 - self.stop_loss_pct / 100)
             if tick.price >= tp:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="TP",
@@ -122,13 +130,21 @@ class ColorStreakStrategy(Strategy):
         if day_key in self._entered_today:
             return []
         self._entered_today.add(day_key)
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
         self._open[tick.symbol] = _Pos(
             entry=tick.price, entry_time=tick.timestamp, streak_n=streak_n,
+            tp_price=tp_price, sl_price=sl_price,
         )
         return [Signal(
             symbol=tick.symbol, side=Side.BUY, confidence=self.confidence,
             strategy=self.name, timestamp=tick.timestamp,
-            note=f"color_streak={streak_n} prev_close={prev_close} @ {tick.price}",
+            note=f"color_streak={streak_n} prev_close={prev_close} TP={tp_price} SL={sl_price}",
         )]
 
     def _sig(self, tick: Tick, side: Side, *, note: str,

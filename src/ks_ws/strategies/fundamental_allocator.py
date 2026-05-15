@@ -69,7 +69,11 @@ class FundamentalAllocator(Allocator):
         for s in signals:
             by_symbol[s.symbol].append(s)
 
-        now = datetime.now(UTC)
+        # 사용자 룰 (2026-05-15) — Allocator timestamp bug fix:
+        # backtest 환경에서 OrderIntent.timestamp 가 datetime.now() 로
+        # 덮어쓰여 모든 trade 가 실행 시각으로 몰리는 버그. signal.timestamp
+        # 자체가 backtest 에선 historical, live 에선 실제 시각이라 그대로 사용.
+        now = max(s.timestamp for s in signals)
         intents: list[OrderIntent] = []
         for symbol, sigs in by_symbol.items():
             macro = self.score_for(symbol)

@@ -352,9 +352,18 @@ async def main() -> int:
     review_log = TradeReviewLog("data/trade_review.sqlite")
     log.info("TradeReviewLog opened: data/trade_review.sqlite (%d existing rows)", len(review_log))
 
+    # ATR providers per style (사용자 룰 2026-05-15) — 스타일별 timeframe.
+    # 스캘핑 = 1m, 단타 = 5m, 스윙 = 15m, 중기 = 1d.
+    from ks_ws.sources.atr_provider import BarStoreATRProvider
+    atr_scalping = BarStoreATRProvider(bar_store, timeframe="1m", period=14, ttl_seconds=300)
+    atr_day = BarStoreATRProvider(bar_store, timeframe="5m", period=14, ttl_seconds=900)
+    atr_swing = BarStoreATRProvider(bar_store, timeframe="15m", period=14, ttl_seconds=1800)
+    atr_mid = BarStoreATRProvider(bar_store, timeframe="1d", period=14, ttl_seconds=3600)
+    log.info("ATR providers initialized: scalping(1m) / day(5m) / swing(15m) / mid(1d)")
+
     strategy = LiveBreakoutStrategy(
-        high60=high60, take_profit_pct=2.0, stop_loss_pct=3.0, max_hold_minutes=60,
-        review_log=review_log,
+        high60=high60, take_profit_pct=2.0, stop_loss_pct=1.5, max_hold_minutes=240,
+        review_log=review_log, atr_provider=atr_day,
     )
     closing_bet = ClosingBetStrategy(
         watchlist=set(codes),
@@ -364,10 +373,11 @@ async def main() -> int:
         review_log=review_log,
     )
 
-    # Pattern strategies — fed by detectors using BarStore daily history.
-    _PS_KW = {"take_profit_pct": 3.0, "stop_loss_pct": 2.0,
-              "max_hold_minutes": 240, "confidence": 0.6,
-              "review_log": review_log}
+    # Pattern strategies — 스윙 (15분봉, 5-10일 hold). atr_swing 주입.
+    _PS_KW = {"take_profit_pct": 8.0, "stop_loss_pct": 4.0,
+              "confidence": 0.6,
+              "review_log": review_log,
+              "atr_provider": atr_swing}
     double_bottom_strat = DoubleBottomStrategy(**_PS_KW)
     box_breakout_strat = BoxBreakoutStrategy(**_PS_KW)
     inverse_hns_strat = InverseHeadShouldersStrategy(**_PS_KW)
@@ -382,18 +392,19 @@ async def main() -> int:
              len(prev_hl), len(codes))
     vol_breakout_strat = VolatilityBreakoutStrategy(
         prev_high_low=prev_hl, k=0.5,
-        take_profit_pct=3.0, stop_loss_pct=2.0,
-        max_hold_minutes=360, confidence=0.65,
-        review_log=review_log,
+        take_profit_pct=2.5, stop_loss_pct=1.5,
+        max_hold_minutes=240, confidence=0.65,
+        review_log=review_log, atr_provider=atr_day,
     )
 
-    # VWAP 평균회귀 — 11th live strategy. 횡보장 위주, 강한 호재 종목 부적합 가능.
+    # VWAP 평균회귀 — 11th live strategy. 스캘핑 (1m ATR backstop).
     vwap_strat = VWAPMeanReversionStrategy(
         watchlist=set(codes),
         entry_sigma=1.5, stop_sigma=2.5,
         volume_spike_multiplier=3.0,
+        take_profit_pct=1.0, stop_loss_pct=0.6,
         confidence=0.5,
-        review_log=review_log,
+        review_log=review_log, atr_provider=atr_scalping,
     )
 
     # NR7 변동성 expansion — 12th live strategy. 일봉 7일 최소 range 후 다음날
@@ -404,18 +415,18 @@ async def main() -> int:
              nr7_count, len(nr7_setup))
     nr7_strat = NR7BreakoutStrategy(
         setup=nr7_setup,
-        take_profit_pct=3.0, stop_loss_pct=2.0,
-        max_hold_minutes=360, confidence=0.6,
-        review_log=review_log,
+        take_profit_pct=2.5, stop_loss_pct=1.5,
+        max_hold_minutes=240, confidence=0.6,
+        review_log=review_log, atr_provider=atr_day,
     )
 
-    # BNF 이격도 — 13th. 분봉 MA25 대비 -15% 이상 이탈 시 BUY.
+    # BNF 이격도 — 13th. 분봉 MA25 대비 -15% 이상 이탈 시 BUY. 단타 (5m ATR).
     ma25_provider = BarStoreMA25Provider(bar_store, lookback=25, ttl_seconds=300)
     bnf_strat = BNFDisparityStrategy(
         ma25_provider=ma25_provider, disparity_pct=15.0,
-        take_profit_pct=5.0, stop_loss_pct=3.0,
-        max_hold_minutes=480, confidence=0.55,
-        review_log=review_log,
+        take_profit_pct=3.0, stop_loss_pct=2.0,
+        max_hold_minutes=240, confidence=0.55,
+        review_log=review_log, atr_provider=atr_day,
     )
 
     # 듀얼 트러스트 — 14th. 시가 + k1 * range 돌파 BUY.
@@ -423,54 +434,55 @@ async def main() -> int:
     log.info("DualThrust ranges computed for %d/%d symbols", len(dt_ranges), len(codes))
     dual_thrust_strat = DualThrustStrategy(
         ranges=dt_ranges, k1=0.5, k2=0.5,
-        take_profit_pct=3.0, stop_loss_pct=2.0,
-        max_hold_minutes=360, confidence=0.6,
-        review_log=review_log,
+        take_profit_pct=2.5, stop_loss_pct=1.5,
+        max_hold_minutes=240, confidence=0.6,
+        review_log=review_log, atr_provider=atr_day,
     )
 
-    # 시초 모멘텀 — 15th. 09:03-09:25 시초가 +5% 강한 갭 + 거래량 spike.
+    # 시초 모멘텀 — 15th. 09:03-09:25 시초가 +5% 강한 갭 + 거래량 spike. 스캘핑.
     # NOTE: 책 strategy G 의 핵심 = 09:50 force_exit (time-based 단타).
     # 다른 strategy 들의 no_force_close 룰과 다름 — 이 strategy 만 예외.
     opening_strat = OpeningMomentumStrategy(
         watchlist=set(codes),
-        surge_pct=5.0, take_profit_pct=3.0,
-        review_log=review_log,
+        surge_pct=5.0, take_profit_pct=1.5, stop_loss_pct=0.8,
+        review_log=review_log, atr_provider=atr_scalping,
     )
 
-    # 외국인수급 — 16th. ForeignNetBuy event spike → BUY (다음 tick 으로 진입).
+    # 외국인수급 — 16th. 중기 (일봉 ATR + 20-90일 hold). 사용자 doc 5/15.
     foreign_flow_strat = ForeignFlowStrategy(
         watchlist=set(codes),
         strong_threshold_krw=100_000_000_000,  # 1000억 spike
-        take_profit_pct=3.0, stop_loss_pct=2.0,
-        max_hold_minutes=240, confidence=0.6,
-        review_log=review_log,
+        take_profit_pct=20.0, stop_loss_pct=8.0,
+        max_hold_minutes=60 * 24 * 30,  # 30일
+        confidence=0.6,
+        review_log=review_log, atr_provider=atr_mid,
     )
 
-    # 양봉연속 — 17th. 최근 3+ 일봉 연속 양봉 → 다음 거래일 prev_close cross BUY.
+    # 양봉연속 — 17th. 스윙 (15분봉 ATR + 3일 hold). 사용자 doc 5/15.
     color_setup = compute_color_streak_setup(bar_store, codes, min_streak=3)
     log.info("ColorStreak setup: %d/%d 종목 N>=3 연속 양봉", len(color_setup), len(codes))
     color_streak_strat = ColorStreakStrategy(
         setup=color_setup,
-        take_profit_pct=3.0, stop_loss_pct=2.0,
-        max_hold_minutes=360, confidence=0.6,
-        review_log=review_log,
+        take_profit_pct=6.0, stop_loss_pct=3.0,
+        confidence=0.6,
+        review_log=review_log, atr_provider=atr_swing,
     )
 
-    # 피벗절반눌림 — 18th. R1 도달 후 half_up cross BUY.
+    # 피벗절반눌림 — 18th. 단타 (5분봉 ATR).
     pivot_levels = compute_pivots(bar_store, codes)
     pivot_pullback_strat = PivotHalfPullbackStrategy(
         pivots=pivot_levels,
-        take_profit_pct=2.5, stop_loss_pct=2.0,
+        take_profit_pct=2.5, stop_loss_pct=1.5,
         max_hold_minutes=240, confidence=0.6,
-        review_log=review_log,
+        review_log=review_log, atr_provider=atr_day,
     )
 
-    # 체결폭주 — 19th. 분 단위 tick 수 3배 폭증 → BUY (15분 holding).
+    # 체결폭주 — 19th. 스캘핑 (1m ATR + 15분 hold).
     tape_burst_strat = TapeBurstStrategy(
         baseline_minutes=10, burst_ratio=3.0, min_baseline_count=10,
-        take_profit_pct=1.5, stop_loss_pct=1.0,
+        take_profit_pct=1.0, stop_loss_pct=0.5,
         max_hold_minutes=15, confidence=0.55,
-        review_log=review_log,
+        review_log=review_log, atr_provider=atr_scalping,
     )
 
     # MacroCalendar — CPI/FOMC/NFP 24h 회피 가드. BUY 만 차단, SELL pass.

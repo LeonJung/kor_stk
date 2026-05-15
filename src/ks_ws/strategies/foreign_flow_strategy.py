@@ -30,21 +30,25 @@ class _Pos:
     entry: int
     entry_time: datetime
     foreign_flow_at_entry: int
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 class ForeignFlowStrategy(Strategy):
     name = "foreign_flow"
+    style = "mid_term"  # 사용자 룰 (2026-05-15) — 중기 2주-6개월
 
     def __init__(
         self,
         *,
         watchlist: set[str] | None = None,
         strong_threshold_krw: int = 100_000_000_000,  # 1000억 = strong
-        take_profit_pct: float = 3.0,
-        stop_loss_pct: float = 2.0,
-        max_hold_minutes: int = 240,
+        take_profit_pct: float = 20.0,
+        stop_loss_pct: float = 8.0,
+        max_hold_minutes: int = 60 * 24 * 30,  # 30일 default (중기)
         confidence: float = 0.6,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if strong_threshold_krw <= 0:
             raise ValueError("strong_threshold_krw must be positive")
@@ -59,6 +63,7 @@ class ForeignFlowStrategy(Strategy):
         self.max_hold = timedelta(minutes=max_hold_minutes)
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._open: dict[str, _Pos] = {}
         self._latest_flow: dict[str, int] = {}
         self._entered_today: set[tuple[str, object]] = set()
@@ -101,8 +106,8 @@ class ForeignFlowStrategy(Strategy):
         # Exit logic first
         pos = self._open.get(tick.symbol)
         if pos is not None:
-            tp = pos.entry * (1 + self.take_profit_pct / 100)
-            sl = pos.entry * (1 - self.stop_loss_pct / 100)
+            tp = pos.tp_price if pos.tp_price is not None else pos.entry * (1 + self.take_profit_pct / 100)
+            sl = pos.sl_price if pos.sl_price is not None else pos.entry * (1 - self.stop_loss_pct / 100)
             if tick.price >= tp:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="TP",
@@ -132,9 +137,17 @@ class ForeignFlowStrategy(Strategy):
         if day_key in self._entered_today:
             return []
         self._entered_today.add(day_key)
+        from ks_ws.strategies._atr_helper import resolve_tp_sl
+        tp_price, sl_price = resolve_tp_sl(
+            tick.price, tick.symbol,
+            atr_provider=self.atr_provider, style=self.style,
+            fallback_tp_pct=self.take_profit_pct,
+            fallback_sl_pct=self.stop_loss_pct,
+        )
         self._open[tick.symbol] = _Pos(
             entry=tick.price, entry_time=tick.timestamp,
             foreign_flow_at_entry=flow,
+            tp_price=tp_price, sl_price=sl_price,
         )
         # Consume the flow trigger (one entry per spike)
         self._latest_flow[tick.symbol] = 0

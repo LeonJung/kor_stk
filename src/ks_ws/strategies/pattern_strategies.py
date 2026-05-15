@@ -43,21 +43,36 @@ class _Pos:
     qty_hint: int = 1
     entry_note: str | None = None
     macro_score: float | None = None
+    # ATR-derived absolute TP/SL prices (entry 시점 계산). None = fallback pct 사용.
+    tp_price: int | None = None
+    sl_price: int | None = None
 
 
 class _PatternStrategyBase(Strategy):
-    """Common entry/exit machinery for pattern strategies."""
+    """Common entry/exit machinery for pattern strategies.
+
+    스윙 스타일 (사용자 명시 2026-05-15): max_hold 3-10일, TP/SL = ATR x 2/1
+    (15분봉 ATR, fallback = 일봉 ATR).
+
+    `atr_provider` (callable: symbol → ATR float) 제공 시 entry 가격 기준
+    ATR 으로 TP/SL 동적 계산. 없으면 fallback `take_profit_pct` / `stop_loss_pct`.
+    """
 
     name: str = "pattern_base"
+    style: str = "swing"  # 사용자 룰 docs/strategy_style_groups.md
+    # Class-default hold days (사용자 권고 2026-05-15, 스윙 3-10일).
+    # 서브클래스가 override. paper_trade 에서 max_hold_minutes 명시 안 주면 적용.
+    default_hold_days: int = 5
 
     def __init__(
         self,
         *,
         take_profit_pct: float = 3.0,
         stop_loss_pct: float = 2.0,
-        max_hold_minutes: int = 240,
+        max_hold_minutes: int | None = None,
         confidence: float = 0.6,
         review_log: TradeReviewLog | None = None,
+        atr_provider=None,
     ) -> None:
         if take_profit_pct <= 0 or stop_loss_pct <= 0:
             raise ValueError("pct must be positive")
@@ -65,11 +80,33 @@ class _PatternStrategyBase(Strategy):
             raise ValueError("confidence in (0,1]")
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
+        if max_hold_minutes is None:
+            max_hold_minutes = self.default_hold_days * 24 * 60
         self.max_hold = timedelta(minutes=max_hold_minutes)
         self.confidence = confidence
         self.review_log = review_log
+        self.atr_provider = atr_provider
         self._open: dict[str, _Pos] = {}
         self._entered_today: set[tuple[str, object]] = set()
+
+    def _compute_tp_sl(self, entry_price: int, symbol: str) -> tuple[int, int]:
+        """ATR provider 있으면 ATR-based, 없으면 fallback pct."""
+        if self.atr_provider is not None:
+            try:
+                from ks_ws.sources.atr_provider import compute_tp_sl
+                atr = float(self.atr_provider(symbol) or 0)
+                if atr > 0:
+                    return compute_tp_sl(
+                        entry_price, atr, self.style,
+                        fallback_tp_pct=self.take_profit_pct,
+                        fallback_sl_pct=self.stop_loss_pct,
+                    )
+            except Exception:
+                pass
+        # Fallback
+        tp = int(entry_price * (1 + self.take_profit_pct / 100))
+        sl = int(entry_price * (1 - self.stop_loss_pct / 100))
+        return tp, sl
 
     def _record_review(self, pos: _Pos, tick: Tick, *, exit_reason: str,
                        exit_note: str) -> None:
@@ -91,8 +128,11 @@ class _PatternStrategyBase(Strategy):
         pos = self._open.get(tick.symbol)
         if pos is None:
             return []
-        tp = pos.entry * (1 + self.take_profit_pct / 100)
-        sl = pos.entry * (1 - self.stop_loss_pct / 100)
+        # ATR-based TP/SL (entry 시 계산해 _Pos 에 저장). fallback = pct.
+        tp = pos.tp_price if pos.tp_price is not None else (
+            pos.entry * (1 + self.take_profit_pct / 100))
+        sl = pos.sl_price if pos.sl_price is not None else (
+            pos.entry * (1 - self.stop_loss_pct / 100))
         if tick.price >= tp:
             del self._open[tick.symbol]
             self._record_review(pos, tick, exit_reason="TP", exit_note=f"TP @ {tick.price}")
@@ -114,11 +154,16 @@ class _PatternStrategyBase(Strategy):
         day_key = (symbol, ts.date())
         if day_key in self._entered_today or symbol in self._open:
             return []
-        self._open[symbol] = _Pos(entry=price, entry_time=ts)
+        tp_price, sl_price = self._compute_tp_sl(price, symbol)
+        self._open[symbol] = _Pos(
+            entry=price, entry_time=ts,
+            tp_price=tp_price, sl_price=sl_price,
+        )
         self._entered_today.add(day_key)
         return [Signal(
             symbol=symbol, side=Side.BUY, confidence=self.confidence,
-            strategy=self.name, timestamp=ts, note=note,
+            strategy=self.name, timestamp=ts,
+            note=f"{note} TP={tp_price} SL={sl_price}",
         )]
 
     def _sig(self, symbol: str, ts: datetime, side: Side, *,
@@ -138,6 +183,7 @@ class _PatternStrategyBase(Strategy):
 
 class DoubleBottomStrategy(_PatternStrategyBase):
     name = "double_bottom"
+    default_hold_days = 5
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, DoubleBottomDetected):
@@ -153,6 +199,7 @@ class DoubleBottomStrategy(_PatternStrategyBase):
 
 class BoxBreakoutStrategy(_PatternStrategyBase):
     name = "box_breakout"
+    default_hold_days = 5
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, BoxBreakoutDetected):
@@ -167,6 +214,7 @@ class BoxBreakoutStrategy(_PatternStrategyBase):
 
 class InverseHeadShouldersStrategy(_PatternStrategyBase):
     name = "inverse_head_shoulders"
+    default_hold_days = 7
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, HeadShouldersDetected):
@@ -183,6 +231,7 @@ class InverseHeadShouldersStrategy(_PatternStrategyBase):
 
 class FlagPennantStrategy(_PatternStrategyBase):
     name = "flag_pennant"
+    default_hold_days = 3
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, FlagPennantDetected):
@@ -197,6 +246,7 @@ class FlagPennantStrategy(_PatternStrategyBase):
 
 class CupHandleStrategy(_PatternStrategyBase):
     name = "cup_handle"
+    default_hold_days = 10
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, CupHandleDetected):
@@ -211,6 +261,7 @@ class CupHandleStrategy(_PatternStrategyBase):
 
 class TriangleStrategy(_PatternStrategyBase):
     name = "triangle"
+    default_hold_days = 5
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, TriangleDetected):
@@ -229,6 +280,7 @@ class TriangleStrategy(_PatternStrategyBase):
 
 class WedgeStrategy(_PatternStrategyBase):
     name = "wedge"
+    default_hold_days = 5
 
     def on_event(self, event: Event) -> list[Signal]:
         if not isinstance(event, WedgeDetected):
