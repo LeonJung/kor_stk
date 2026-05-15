@@ -115,6 +115,9 @@ async def main() -> int:
     from ks_ws.storage.universe import UniverseRegistry
     from ks_ws.strategies.closing_bet import ClosingBetStrategy
     from ks_ws.strategies.fundamental_allocator import FundamentalAllocator
+    from ks_ws.strategies.symbol_weights import SymbolWeightMatrix
+    from ks_ws.sources.sector_blacklist import filter_universe, load_name_map
+    from ks_ws.sources.regime_gate import RegimeGate
     from ks_ws.strategies.gates import EntryWindowGate
     from ks_ws.strategies.live_breakout import LiveBreakoutStrategy, compute_high60
     from ks_ws.strategies.bnf_disparity import (
@@ -187,6 +190,17 @@ async def main() -> int:
     log.info("Universe: 시총 top %d (%s...) + active top %d (%s)",
              top_market_n, ",".join(market_codes[:3]),
              len(active_codes), ",".join(active_codes) or "none")
+
+    # Tier 1 sector blacklist (사용자 룰 2026-05-15) — 게임/엔터/화장품/2차전지 등
+    # 변동성 큰 sector 자동 차단. 변동성돌파 검증 시 자본 효율 2배 + 승률 +7%p.
+    _name_map = load_name_map("data/universe.sqlite")
+    _pre_filter = list(codes)
+    codes = filter_universe(codes, _name_map)
+    _filtered_out = [c for c in _pre_filter if c not in set(codes)]
+    if _filtered_out:
+        log.info("Sector blacklist 차단 %d 종목: %s",
+                 len(_filtered_out),
+                 ",".join(f"{c}({_name_map.get(c,'?')})" for c in _filtered_out[:5]))
 
     # Phase 2.1 worker partition: 다중 worker process 시 universe 분배.
     worker_id, total_workers = _parse_worker_args()
@@ -541,7 +555,26 @@ async def main() -> int:
              len(_foreign_dates), _foreign_dates[0], _foreign_dates[-1])
     # KOSPI 일봉 — multi-timeframe regime 의 daily index input
     kospi_bars = list(bar_store.read("KOSPI", "1d"))
-    allocator = FundamentalAllocator(max_position_per_symbol=10, min_score=0.5)
+    # Tier 5 SymbolWeightMatrix (사용자 룰 2026-05-15) — walk-forward 기반
+    # 종목별 weight. 매주 update_symbol_weights cron 으로 갱신.
+    _sym_w = SymbolWeightMatrix(db_path="data/symbol_weights.sqlite")
+    _sym_w_n = _sym_w.load()
+    log.info("SymbolWeightMatrix loaded: %d entries", _sym_w_n)
+    allocator = FundamentalAllocator(
+        max_position_per_symbol=10, min_score=0.5,
+        symbol_weights=_sym_w if _sym_w_n > 0 else None,
+    )
+    # 양봉연속 / 박스권돌파 = 만성 적자 strategy 비활성 (사용자 룰 2026-05-15)
+    allocator.set_weight("color_streak", 0.0)
+    allocator.set_weight("box_breakout", 0.0)
+
+    # Tier 4 RegimeGate (사용자 룰 2026-05-15) — KOSPI 5/20일선 추세 기반.
+    # V1: BUY 전 RegimeGate.is_active() check 는 LiveExecutor 가 후속 wiring.
+    # 일단 인스턴스 만들어 두고 log 만 출력.
+    regime_gate = RegimeGate(bar_store)
+    _regime = regime_gate.snapshot()
+    log.info("RegimeGate snapshot: active=%s score=%d (%s)",
+             _regime.active, _regime.score, _regime.reason())
     macro_set = 0
     base_macro: dict[str, float] = {}  # for DynamicMacroUpdater
     static_scores: dict[str, tuple[float, float, float]] = {}  # for BaseMacroRefresher

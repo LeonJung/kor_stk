@@ -43,8 +43,10 @@ class FundamentalAllocator(Allocator):
         max_position_per_symbol: int = 100,
         min_score: float = 0.5,
         default_score: float = 1.0,
+        symbol_weights=None,  # Tier 5 SymbolWeightMatrix (사용자 룰 2026-05-15)
     ) -> None:
-        super().__init__(max_position_per_symbol=max_position_per_symbol)
+        super().__init__(max_position_per_symbol=max_position_per_symbol,
+                         symbol_weights=symbol_weights)
         if min_score < 0:
             raise ValueError("min_score must be non-negative")
         if default_score < 0:
@@ -99,11 +101,21 @@ class FundamentalAllocator(Allocator):
 
             # Pattern 4 Position Sizing: BUY quantity further scales by min(macro, 1.0).
             # SELL keeps full magnitude — exits must not be size-attenuated.
+            sources_set = {s.strategy for s in sigs}
             if side == Side.BUY:
                 magnitude *= min(macro, 1.0)
+                # Tier 5 종목별 weight (사용자 룰 2026-05-15)
+                if self.symbol_weights is not None:
+                    sym_w = max(
+                        (self._symbol_weight(strat, symbol) for strat in sources_set),
+                        default=1.0,
+                    )
+                    magnitude *= sym_w
+                    if magnitude <= 0:
+                        continue  # weight=0 차단
 
             quantity = max(1, int(magnitude * self.max_position_per_symbol))
-            sources = tuple(sorted({s.strategy for s in sigs}))
+            sources = tuple(sorted(sources_set))
 
             intents.append(
                 OrderIntent(

@@ -35,6 +35,11 @@ class _Pos:
     entry_time: datetime
     tp_price: int | None = None
     sl_price: int | None = None
+    # Anchor-based trailing (사용자 룰 2026-05-15 Tier 3):
+    # 처음 entry × (1 + activation_pct) 도달 후 max_seen 추적 시작.
+    # max_seen × (1 - trail_pct) 이탈 시 SELL.
+    max_seen: int = 0
+    trail_active: bool = False
 
 
 class VolatilityBreakoutStrategy(Strategy):
@@ -52,6 +57,9 @@ class VolatilityBreakoutStrategy(Strategy):
         confidence: float = 0.65,
         review_log: TradeReviewLog | None = None,
         atr_provider=None,
+        # Tier 3 trailing (사용자 룰 2026-05-15)
+        trailing_activation_pct: float = 1.5,  # entry × (1 + N%) 도달 후 trailing 시작
+        trailing_pct: float = 1.0,  # max_seen × (1 - N%) 이탈 시 SELL
     ) -> None:
         if not 0 < k < 2:
             raise ValueError("k must be in (0, 2)")
@@ -59,6 +67,8 @@ class VolatilityBreakoutStrategy(Strategy):
             raise ValueError("pct must be positive")
         if not 0 < confidence <= 1:
             raise ValueError("confidence in (0, 1]")
+        if trailing_activation_pct < 0 or trailing_pct <= 0:
+            raise ValueError("trailing pct must be non-negative / positive")
         self.prev_hl = dict(prev_high_low)
         self.k = k
         self.take_profit_pct = take_profit_pct
@@ -67,6 +77,8 @@ class VolatilityBreakoutStrategy(Strategy):
         self.confidence = confidence
         self.review_log = review_log
         self.atr_provider = atr_provider
+        self.trailing_activation_pct = trailing_activation_pct
+        self.trailing_pct = trailing_pct
         self._open: dict[str, _Pos] = {}
         # symbol → (date, open_price)
         self._day_open: dict[str, tuple[object, int]] = {}
@@ -115,6 +127,12 @@ class VolatilityBreakoutStrategy(Strategy):
         if pos is not None:
             tp = pos.tp_price if pos.tp_price is not None else pos.entry * (1 + self.take_profit_pct / 100)
             sl = pos.sl_price if pos.sl_price is not None else pos.entry * (1 - self.stop_loss_pct / 100)
+            # Tier 3 anchor-based trailing 활성/갱신
+            if tick.price > pos.max_seen:
+                pos.max_seen = tick.price
+            activation_price = pos.entry * (1 + self.trailing_activation_pct / 100)
+            if not pos.trail_active and pos.max_seen >= activation_price:
+                pos.trail_active = True
             if tick.price >= tp:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="TP",
@@ -126,6 +144,15 @@ class VolatilityBreakoutStrategy(Strategy):
                                     exit_note=f"SL @ {tick.price}")
                 return [self._sig(tick, Side.SELL, urgency="high",
                                   note=f"SL @ {tick.price}")]
+            # Trailing 이탈 check (trail_active 일 때만)
+            if pos.trail_active:
+                trail_stop = pos.max_seen * (1 - self.trailing_pct / 100)
+                if tick.price <= trail_stop:
+                    del self._open[tick.symbol]
+                    self._record_review(pos, tick, exit_reason="trail",
+                                        exit_note=f"trail @ {tick.price} max={pos.max_seen}")
+                    return [self._sig(tick, Side.SELL,
+                                      note=f"trail @ {tick.price} max={pos.max_seen}")]
             if tick.timestamp - pos.entry_time >= self.max_hold:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="timeout",
@@ -158,6 +185,7 @@ class VolatilityBreakoutStrategy(Strategy):
         self._open[tick.symbol] = _Pos(
             entry=tick.price, entry_time=tick.timestamp,
             tp_price=tp_price, sl_price=sl_price,
+            max_seen=tick.price,  # 초기 max = entry
         )
         return [Signal(
             symbol=tick.symbol, side=Side.BUY, confidence=self.confidence,

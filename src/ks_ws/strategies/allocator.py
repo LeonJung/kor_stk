@@ -27,11 +27,16 @@ _EPSILON = 1e-9
 
 
 class Allocator:
-    def __init__(self, *, max_position_per_symbol: int = 100) -> None:
+    def __init__(
+        self, *,
+        max_position_per_symbol: int = 100,
+        symbol_weights=None,  # SymbolWeightMatrix 또는 호출가능 (strategy, symbol)→float
+    ) -> None:
         if max_position_per_symbol <= 0:
             raise ValueError("max_position_per_symbol must be positive")
         self.max_position_per_symbol = max_position_per_symbol
         self._weights: dict[str, float] = {}
+        self.symbol_weights = symbol_weights
 
     def set_weight(self, strategy_name: str, weight: float) -> None:
         if weight < 0:
@@ -40,6 +45,17 @@ class Allocator:
 
     def weight_for(self, strategy_name: str) -> float:
         return self._weights.get(strategy_name, 1.0)
+
+    def _symbol_weight(self, strategy: str, symbol: str) -> float:
+        """Tier 5 종목별 weight (walk-forward backtest 기반)."""
+        if self.symbol_weights is None:
+            return 1.0
+        try:
+            if hasattr(self.symbol_weights, "weight_for"):
+                return float(self.symbol_weights.weight_for(strategy, symbol))
+            return float(self.symbol_weights(strategy, symbol))
+        except Exception:
+            return 1.0
 
     def combine(self, signals: list[Signal]) -> list[OrderIntent]:
         if not signals:
@@ -68,8 +84,20 @@ class Allocator:
 
             side = Side.BUY if net > 0 else Side.SELL
             magnitude = min(abs(net), 1.0)
+            # 사용자 룰 (2026-05-15) Tier 5: BUY 시 종목별 weight 곱.
+            # SELL 은 청산이라 weight X 적용 (보유 분 모두 처분).
+            sources_set = {s.strategy for s in sigs}
+            if side == Side.BUY and self.symbol_weights is not None:
+                # 여러 strategy 동시 발화 시 최대 weight 사용 (가장 신뢰 strategy 기준)
+                sym_w = max(
+                    (self._symbol_weight(strat, symbol) for strat in sources_set),
+                    default=1.0,
+                )
+                magnitude *= sym_w
+                if magnitude <= 0:
+                    continue  # weight=0 = 차단
             quantity = max(1, int(magnitude * self.max_position_per_symbol))
-            sources = tuple(sorted({s.strategy for s in sigs}))
+            sources = tuple(sorted(sources_set))
 
             intents.append(
                 OrderIntent(
