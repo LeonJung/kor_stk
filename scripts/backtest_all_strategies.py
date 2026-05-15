@@ -76,6 +76,7 @@ from ks_ws.strategies.volatility_breakout import (
     VolatilityBreakoutStrategy,
     compute_prev_high_low,
 )
+from ks_ws.sources.atr_provider import BarStoreATRProvider
 
 _STRATEGY_KR = {
     "breakout": "신고가매매",
@@ -112,19 +113,40 @@ def _kr(s: str) -> str:
     return _STRATEGY_KR.get(s, s)
 
 
+_STYLE_OF = {
+    "breakout": "day_trade", "volatility_breakout": "day_trade",
+    "nr7_breakout": "day_trade", "dual_thrust": "day_trade",
+    "pivot_half_pullback": "day_trade", "bnf_disparity": "day_trade",
+    "closing_bet": "day_trade",
+    "double_bottom": "swing", "box_breakout": "swing",
+    "inverse_head_shoulders": "swing", "flag_pennant": "swing",
+    "cup_handle": "swing", "triangle": "swing", "wedge": "swing",
+    "color_streak": "swing",
+    "vwap_reversion": "scalping", "opening_momentum": "scalping",
+    "tape_burst": "scalping",
+    "foreign_flow": "mid_term",
+}
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--days", type=int, default=252, help="lookback days (default 252 = 1년)")
-    p.add_argument("--top", type=int, default=20, help="universe size")
+    p.add_argument("--top", type=int, default=20, help="universe size (0 = all)")
+    p.add_argument("--csv-out-prefix", type=str, default="",
+                   help="CSV 출력 prefix (예: data/reports/foo → foo_trades.csv + foo_summary.csv)")
     args = p.parse_args()
 
     bar_store = BarStore("data")
     reg = UniverseRegistry("data/universe.sqlite")
-    universe = reg.top_by_market_cap(args.top)
+    if args.top <= 0:
+        # all = 등록된 전체 universe
+        universe = reg.top_by_market_cap(100_000)
+    else:
+        universe = reg.top_by_market_cap(args.top)
     codes = [e.code for e in universe]
     reg.close()
 
-    print(f"\n=== backtest_all_strategies | universe top {args.top} | "
+    print(f"\n=== backtest_all_strategies | universe {len(codes)} | "
           f"lookback {args.days}일 ===\n")
 
     # --- Load bars for all codes ---
@@ -149,27 +171,36 @@ def main() -> int:
         if bars:
             pivots[sym] = compute_pivot_levels(bars[-1])
 
+    # ATR providers — 일봉 backtest 에선 1d ATR 만 가능 (intraday bars 없음).
+    # 단타/스캘핑 strategies 도 1d ATR fallback. swing/mid 도 동일.
+    atr_d = BarStoreATRProvider(bar_store, timeframe="1d", period=14, ttl_seconds=3600)
+
     # --- 13 strategies (skip tick-density ones for daily backtest) ---
     strategies = [
         LiveBreakoutStrategy(high60=high60, take_profit_pct=2.0,
-                             stop_loss_pct=3.0, max_hold_minutes=60),
-        DoubleBottomStrategy(),
-        BoxBreakoutStrategy(),
-        InverseHeadShouldersStrategy(),
-        FlagPennantStrategy(),
-        CupHandleStrategy(),
-        TriangleStrategy(),
-        WedgeStrategy(),
+                             stop_loss_pct=1.5, max_hold_minutes=240,
+                             atr_provider=atr_d),
+        DoubleBottomStrategy(atr_provider=atr_d),
+        BoxBreakoutStrategy(atr_provider=atr_d),
+        InverseHeadShouldersStrategy(atr_provider=atr_d),
+        FlagPennantStrategy(atr_provider=atr_d),
+        CupHandleStrategy(atr_provider=atr_d),
+        TriangleStrategy(atr_provider=atr_d),
+        WedgeStrategy(atr_provider=atr_d),
         VolatilityBreakoutStrategy(prev_high_low=prev_hl, k=0.5,
-                                   take_profit_pct=3.0, stop_loss_pct=2.0),
-        NR7BreakoutStrategy(setup=nr7_setup, take_profit_pct=3.0,
-                            stop_loss_pct=2.0),
+                                   take_profit_pct=2.5, stop_loss_pct=1.5,
+                                   max_hold_minutes=240, atr_provider=atr_d),
+        NR7BreakoutStrategy(setup=nr7_setup, take_profit_pct=2.5,
+                            stop_loss_pct=1.5, max_hold_minutes=240,
+                            atr_provider=atr_d),
         DualThrustStrategy(ranges=dt_ranges, k1=0.5, k2=0.5,
-                           take_profit_pct=3.0, stop_loss_pct=2.0),
-        ColorStreakStrategy(setup=color_setup, take_profit_pct=3.0,
-                            stop_loss_pct=2.0),
+                           take_profit_pct=2.5, stop_loss_pct=1.5,
+                           max_hold_minutes=240, atr_provider=atr_d),
+        ColorStreakStrategy(take_profit_pct=6.0, stop_loss_pct=3.0,
+                            setup=color_setup, atr_provider=atr_d),
         PivotHalfPullbackStrategy(pivots=pivots, take_profit_pct=2.5,
-                                  stop_loss_pct=2.0),
+                                  stop_loss_pct=1.5, max_hold_minutes=240,
+                                  atr_provider=atr_d),
     ]
     print(f"Running {len(strategies)} strategies on daily bars...")
 
@@ -309,6 +340,102 @@ def main() -> int:
             print("    ...")
             for sym, total, n in symtotals[-3:]:
                 print(f"    - {sym} {_name(sym):<10} pnl={total:>+12,} n={n}")
+
+    # --- CSV export: trade-level + summary ---
+    if args.csv_out_prefix:
+        import csv
+        trades_path = f"{args.csv_out_prefix}_trades.csv"
+        summary_path = f"{args.csv_out_prefix}_summary.csv"
+        with open(trades_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["strategy", "style", "symbol", "trade_seq",
+                        "entry_ts", "entry_price", "exit_ts", "exit_price",
+                        "pnl_krw", "pnl_pct", "hold_minutes"])
+            for strat in sorted(by_strat):
+                style = _STYLE_OF.get(strat, "?")
+                trades = by_strat[strat]
+                positions: dict[str, list[tuple]] = defaultdict(list)
+                seq_per_sym: dict[str, int] = defaultdict(int)
+                for sym, side, price, ts in trades:
+                    if side == "buy":
+                        positions[sym].append((price, ts))
+                    elif side == "sell" and positions[sym]:
+                        e_price, e_ts = positions[sym].pop(0)
+                        seq_per_sym[sym] += 1
+                        pnl = price - e_price
+                        pnl_pct = (pnl / e_price * 100) if e_price else 0.0
+                        hold_min = int((ts - e_ts).total_seconds() / 60)
+                        w.writerow([strat, style, sym, seq_per_sym[sym],
+                                    e_ts.isoformat(), e_price,
+                                    ts.isoformat(), price,
+                                    pnl, f"{pnl_pct:.4f}", hold_min])
+        with open(summary_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["strategy", "style", "symbol", "n_trades", "wins",
+                        "losses", "win_rate_pct", "total_pnl_krw",
+                        "mean_pnl_krw", "best_pnl", "worst_pnl"])
+            for strat in sorted(by_strat):
+                style = _STYLE_OF.get(strat, "?")
+                trades = by_strat[strat]
+                per_sym: dict[str, list[int]] = defaultdict(list)
+                positions: dict[str, list[int]] = defaultdict(list)
+                for sym, side, price, _ts in trades:
+                    if side == "buy":
+                        positions[sym].append(price)
+                    elif side == "sell" and positions[sym]:
+                        per_sym[sym].append(price - positions[sym].pop(0))
+                for sym, pnls in per_sym.items():
+                    wins = sum(1 for p in pnls if p > 0)
+                    losses = sum(1 for p in pnls if p < 0)
+                    wr = wins / len(pnls) * 100 if pnls else 0
+                    w.writerow([strat, style, sym, len(pnls), wins, losses,
+                                f"{wr:.2f}", sum(pnls),
+                                int(statistics.mean(pnls)) if pnls else 0,
+                                max(pnls) if pnls else 0,
+                                min(pnls) if pnls else 0])
+        # 기간별 집계 (사용자 룰 2026-05-15) — 스윙=주차별, 중기=월별, 단타/스캘핑=일별
+        period_path = f"{args.csv_out_prefix}_period.csv"
+        with open(period_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["strategy", "style", "symbol", "period_type",
+                        "period_label", "n_trades", "wins", "losses",
+                        "total_pnl_krw", "mean_pnl_krw"])
+            for strat in sorted(by_strat):
+                style = _STYLE_OF.get(strat, "?")
+                if style == "scalping" or style == "day_trade":
+                    ptype = "daily"
+                    fmt = "%Y-%m-%d"
+                elif style == "swing":
+                    ptype = "weekly"
+                    fmt = "%Y-W%V"
+                elif style == "mid_term":
+                    ptype = "monthly"
+                    fmt = "%Y-%m"
+                else:
+                    ptype = "monthly"
+                    fmt = "%Y-%m"
+                positions: dict[str, list[tuple]] = defaultdict(list)
+                # period bucket: (sym, period_label) → [pnl, ...]
+                bucket: dict = defaultdict(list)
+                for sym, side, price, ts in by_strat[strat]:
+                    if side == "buy":
+                        positions[sym].append((price, ts))
+                    elif side == "sell" and positions[sym]:
+                        e_price, e_ts = positions[sym].pop(0)
+                        # 기간 라벨 = entry_ts 의 period (주/월)
+                        label = e_ts.strftime(fmt)
+                        bucket[(sym, label)].append(price - e_price)
+                for (sym, label), pnls in sorted(bucket.items()):
+                    wins = sum(1 for p in pnls if p > 0)
+                    losses = sum(1 for p in pnls if p < 0)
+                    w.writerow([strat, style, sym, ptype, label,
+                                len(pnls), wins, losses,
+                                sum(pnls),
+                                int(statistics.mean(pnls)) if pnls else 0])
+
+        print(f"\n[CSV] trades (회차별) → {trades_path}")
+        print(f"[CSV] summary (종목 합계) → {summary_path}")
+        print(f"[CSV] period (스윙=주/중기=월/단타=일) → {period_path}")
     return 0
 
 
