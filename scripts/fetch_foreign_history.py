@@ -38,14 +38,20 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS foreign_flow (
     symbol TEXT NOT NULL,
     date TEXT NOT NULL,           -- YYYYMMDD
-    net_buy_krw INTEGER NOT NULL,  -- frgn_ntby_qty × stck_clpr
-    qty INTEGER NOT NULL,
+    net_buy_krw INTEGER NOT NULL,  -- frgn_ntby_qty × stck_clpr (외인 순매수 KRW)
+    qty INTEGER NOT NULL,          -- frgn_ntby_qty (외인 순매수 주식수)
     close_price INTEGER NOT NULL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (symbol, date)
 );
 CREATE INDEX IF NOT EXISTS idx_ff_date ON foreign_flow(date);
 """
+
+# 사용자 룰 5/18: 기관 column 추가 (orgn_ntby_qty). 기존 row 는 NULL.
+_MIGRATIONS = [
+    "ALTER TABLE foreign_flow ADD COLUMN inst_net_buy_krw INTEGER",
+    "ALTER TABLE foreign_flow ADD COLUMN inst_qty INTEGER",
+]
 
 _PATH = "/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily"
 _TR_ID = "FHPTJ04160001"
@@ -55,6 +61,12 @@ def open_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=30)
     conn.executescript(_DDL)
     conn.execute("PRAGMA journal_mode=WAL")
+    # 기관 column migrations — 이미 있으면 OperationalError 무시
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     return conn
 
@@ -64,8 +76,11 @@ def existing_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     return {(r[0], r[1]) for r in rows}
 
 
-def fetch_window(symbol: str, end_date_yyyymmdd: str, settings, token) -> list[tuple[str, str, int, int, int]]:
-    """단일 호출 = end_date 부터 과거 30 영업일. 빈 list = 실패/no-data."""
+def fetch_window(symbol: str, end_date_yyyymmdd: str, settings, token) -> list[tuple[str, str, int, int, int, int, int]]:
+    """단일 호출 = end_date 부터 과거 30 영업일. 빈 list = 실패/no-data.
+
+    Returns list of (symbol, date, frgn_net_krw, frgn_qty, close, inst_net_krw, inst_qty).
+    """
     client = make_client(settings)
     try:
         resp = client.get(
@@ -102,11 +117,14 @@ def fetch_window(symbol: str, end_date_yyyymmdd: str, settings, token) -> list[t
         try:
             date = str(r.get("stck_bsop_date") or "").strip()
             clpr = int(r.get("stck_clpr") or 0)
-            qty = int(r.get("frgn_ntby_qty") or 0)
+            frgn_qty = int(r.get("frgn_ntby_qty") or 0)
+            inst_qty = int(r.get("orgn_ntby_qty") or 0)
             if not date or clpr <= 0:
                 continue
-            net_krw = qty * clpr  # 외인 순매수 KRW
-            out.append((symbol, date, net_krw, qty, clpr))
+            frgn_net_krw = frgn_qty * clpr
+            inst_net_krw = inst_qty * clpr
+            out.append((symbol, date, frgn_net_krw, frgn_qty, clpr,
+                        inst_net_krw, inst_qty))
         except (ValueError, TypeError):
             continue
     return out
@@ -114,8 +132,8 @@ def fetch_window(symbol: str, end_date_yyyymmdd: str, settings, token) -> list[t
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--top", type=int, default=200,
-                   help="universe top N (default 200)")
+    p.add_argument("--top", type=int, default=0,
+                   help="universe top N (default 0 = 전종목)")
     p.add_argument("--days", type=int, default=400,
                    help="과거 N영업일 (default 400, ~19개월). KIS 응답 30/call")
     p.add_argument("--workers", type=int, default=8,
@@ -129,7 +147,10 @@ def main() -> int:
     token = get_token(settings)
 
     reg = UniverseRegistry("data/universe.sqlite")
-    universe = reg.top_by_market_cap(args.top)
+    if args.top <= 0:
+        universe = reg.top_by_market_cap(1_000_000)  # 사실상 전종목
+    else:
+        universe = reg.top_by_market_cap(args.top)
     reg.close()
     codes = [e.code for e in universe]
 
@@ -173,15 +194,17 @@ def main() -> int:
         futures = {ex.submit(_do, t): t for t in tasks}
         for fut in as_completed(futures):
             rows = fut.result()
-            for sym, dt, net_krw, qty, clpr in rows:
+            for sym, dt, frgn_net_krw, frgn_qty, clpr, inst_net_krw, inst_qty in rows:
                 if (sym, dt) in already:
                     continue
                 try:
                     conn.execute(
                         "INSERT OR REPLACE INTO foreign_flow "
-                        "(symbol, date, net_buy_krw, qty, close_price, fetched_at) "
-                        "VALUES (?,?,?,?,?,?)",
-                        (sym, dt, net_krw, qty, clpr,
+                        "(symbol, date, net_buy_krw, qty, close_price, "
+                        " inst_net_buy_krw, inst_qty, fetched_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (sym, dt, frgn_net_krw, frgn_qty, clpr,
+                         inst_net_krw, inst_qty,
                          datetime.now(UTC).isoformat()),
                     )
                     already.add((sym, dt))

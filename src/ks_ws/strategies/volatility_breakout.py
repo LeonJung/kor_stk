@@ -22,6 +22,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ks_ws.domain import Bar, Side, Signal, Tick
+
+# 분봉 거래대금 = bar.value 가 누적 (CYBOS 데이터 quirk). on_bar 에서 LAG diff 로
+# 분당 값 계산 — 종목 + 일자별 마지막 cumulative 보관.
 from ks_ws.storage.bars import BarStore
 from ks_ws.storage.trade_review import TradeReview, TradeReviewLog
 from ks_ws.strategies.base import Strategy
@@ -60,6 +63,17 @@ class VolatilityBreakoutStrategy(Strategy):
         # Tier 3 trailing (사용자 룰 2026-05-15)
         trailing_activation_pct: float = 1.5,  # entry × (1 + N%) 도달 후 trailing 시작
         trailing_pct: float = 1.0,  # max_seen × (1 - N%) 이탈 시 SELL
+        # 거래대금 + turnover + RVOL entry filter (사용자 룰 2026-05-18)
+        volume_filter=None,
+        # MTF + 시간대 + KOSPI regime gate (사용자 룰 2026-05-18, 승률 ↑)
+        entry_gate=None,
+        # 상한가 즉시 청산 (사용자 룰 2026-05-18: vb=당일청산이라 상한가 lock 더 hold 무의미)
+        prev_close: dict[str, int] | None = None,
+        limit_up_pct: float = 29.7,  # +29.7% 도달 = 사실상 상한가 (호가 단위 buffer 2tick)
+        # 사용자 룰 5/18 (D): lookahead bias fix.
+        # daily_history 있으면 entry_ts 기준 *전일* 일봉 사용 (정확한 backtest).
+        # 미설정 시 prev_high_low / prev_close dict (legacy = latest bar) 사용.
+        daily_history: dict[str, list] | None = None,
     ) -> None:
         if not 0 < k < 2:
             raise ValueError("k must be in (0, 2)")
@@ -79,6 +93,13 @@ class VolatilityBreakoutStrategy(Strategy):
         self.atr_provider = atr_provider
         self.trailing_activation_pct = trailing_activation_pct
         self.trailing_pct = trailing_pct
+        self.volume_filter = volume_filter
+        self.entry_gate = entry_gate
+        self.prev_close = dict(prev_close) if prev_close else {}
+        self.limit_up_pct = limit_up_pct
+        self.daily_history = daily_history or {}
+        # (symbol, kst_date) → (prev_high, prev_low, prev_close) cache
+        self._prev_bar_cache: dict[tuple[str, object], tuple[int, int, int] | None] = {}
         self._open: dict[str, _Pos] = {}
         # symbol → (date, open_price)
         self._day_open: dict[str, tuple[object, int]] = {}
@@ -86,6 +107,21 @@ class VolatilityBreakoutStrategy(Strategy):
         self._was_above: dict[str, tuple[object, bool]] = {}
         # same-day single entry
         self._entered_today: set[tuple[str, object]] = set()
+        # 누적 value/volume 의 LAG diff 로 분당 계산 — (sym, date) → 직전 cumulative
+        self._cum_prev: dict[tuple[str, object], tuple[int, int]] = {}
+
+    def on_bar(self, bar: Bar) -> list[Signal]:
+        """분봉 도착 시 volume filter rolling stats 갱신 (entry 전 신호로)."""
+        if self.volume_filter is None or bar.timeframe != "1m":
+            return []
+        kst_date = bar.timestamp.astimezone(_KST).date()
+        prev_key = (bar.symbol, kst_date)
+        prev_val, prev_vol = self._cum_prev.get(prev_key, (0, 0))
+        bar_val = max(0, bar.value - prev_val)
+        bar_vol = max(0, bar.volume - prev_vol)
+        self._cum_prev[prev_key] = (bar.value, bar.volume)
+        self.volume_filter.on_bar(bar.symbol, bar_val, bar_vol)
+        return []
 
     def _record_review(self, pos: _Pos, tick: Tick, *, exit_reason: str,
                        exit_note: str) -> None:
@@ -104,11 +140,49 @@ class VolatilityBreakoutStrategy(Strategy):
     def _kst_date(self, tick: Tick) -> object:
         return tick.timestamp.astimezone(_KST).date()
 
-    def _trigger_price(self, symbol: str, day_open: int) -> int | None:
+    def _resolve_prev_bar(self, symbol: str, kst_date) -> tuple[int, int, int] | None:
+        """ts 의 KST date 기준 직전 일봉 (high, low, close) 반환.
+        daily_history 우선, 없으면 legacy prev_hl/prev_close dict (latest bar) fallback.
+        """
+        key = (symbol, kst_date)
+        if key in self._prev_bar_cache:
+            return self._prev_bar_cache[key]
+        bars = self.daily_history.get(symbol, [])
+        if bars:
+            prev = None
+            for b in bars:
+                b_date = b.timestamp.astimezone(_KST).date()
+                if b_date < kst_date:
+                    prev = b
+                else:
+                    break  # bars are sorted by ts ascending
+            if prev is not None:
+                result = (prev.high, prev.low, prev.close)
+                self._prev_bar_cache[key] = result
+                return result
+        # Legacy fallback (5/18 이전 인터페이스 호환 — backtest 의 latest-only bug)
         hl = self.prev_hl.get(symbol)
-        if not hl:
-            return None
-        high, low = hl
+        pc = self.prev_close.get(symbol)
+        if hl and len(hl) == 2:
+            high, low = hl
+            close = pc if pc and pc > 0 else 0
+            result = (high, low, close)
+            self._prev_bar_cache[key] = result
+            return result
+        self._prev_bar_cache[key] = None
+        return None
+
+    def _trigger_price(self, symbol: str, day_open: int, kst_date=None) -> int | None:
+        if kst_date is not None:
+            pb = self._resolve_prev_bar(symbol, kst_date)
+            if not pb:
+                return None
+            high, low, _ = pb
+        else:
+            hl = self.prev_hl.get(symbol)
+            if not hl:
+                return None
+            high, low = hl
         if high <= 0 or low <= 0 or high <= low:
             return None
         return int(day_open + self.k * (high - low))
@@ -133,6 +207,16 @@ class VolatilityBreakoutStrategy(Strategy):
             activation_price = pos.entry * (1 + self.trailing_activation_pct / 100)
             if not pos.trail_active and pos.max_seen >= activation_price:
                 pos.trail_active = True
+            # 상한가 즉시 청산 — vb 는 당일청산 룰이라 상한가 lock 시 더 hold 무의미
+            # entry_ts 기준 직전 일봉 close 사용 (lookahead bias fix)
+            pb_for_limit = self._resolve_prev_bar(tick.symbol, kst_date)
+            pc = pb_for_limit[2] if pb_for_limit else 0
+            if pc and pc > 0 and tick.price >= pc * (1 + self.limit_up_pct / 100):
+                del self._open[tick.symbol]
+                self._record_review(pos, tick, exit_reason="limit_up",
+                                    exit_note=f"limit_up @ {tick.price} (prev_close={pc})")
+                return [self._sig(tick, Side.SELL,
+                                  note=f"limit_up @ {tick.price} (+{(tick.price/pc-1)*100:.1f}%)")]
             if tick.price >= tp:
                 del self._open[tick.symbol]
                 self._record_review(pos, tick, exit_reason="TP",
@@ -161,7 +245,7 @@ class VolatilityBreakoutStrategy(Strategy):
             return []
 
         # Entry check — edge detection (below → above trigger)
-        trigger = self._trigger_price(tick.symbol, day_open)
+        trigger = self._trigger_price(tick.symbol, day_open, kst_date)
         if trigger is None:
             return []
         prev_rec = self._was_above.get(tick.symbol)
@@ -173,6 +257,12 @@ class VolatilityBreakoutStrategy(Strategy):
             return []
         day_key = (tick.symbol, kst_date)
         if day_key in self._entered_today:
+            return []
+        # Volume filter — 거래대금/turnover/RVOL 통과 시만 entry (사용자 룰 5/18)
+        if self.volume_filter is not None and not self.volume_filter.passes(tick.symbol):
+            return []
+        # Entry gate — MTF + KOSPI regime + 시간대 (5/18 승률 ↑ 룰)
+        if self.entry_gate is not None and not self.entry_gate.passes(tick.symbol, tick.timestamp):
             return []
         self._entered_today.add(day_key)
         from ks_ws.strategies._atr_helper import resolve_tp_sl
@@ -218,4 +308,17 @@ def compute_prev_high_low(
             continue
         last = bars[-1]
         out[sym] = (last.high, last.low)
+    return out
+
+
+def compute_prev_close(
+    bar_store: BarStore, symbols: list[str],
+) -> dict[str, int]:
+    """Return {symbol: prev_close} from BarStore 1d. 상한가 청산 룰의 base price."""
+    out: dict[str, int] = {}
+    for sym in symbols:
+        bars: list[Bar] = list(bar_store.read(sym, "1d"))
+        if not bars:
+            continue
+        out[sym] = bars[-1].close
     return out

@@ -146,6 +146,12 @@ def compute_tp_sl(
     mult = ATR_MULTIPLIERS[style]
     tp = entry_price + atr * mult["tp"]
     sl = entry_price - atr * mult["sl"]
+    # 사용자 룰 (5/18 SL 버그 조사 결과): fallback pct 가 SL 보수성의 ceiling.
+    # ATR-based SL 가 사용자 지정 pct 보다 더 멀면 (덜 보수적) → 사용자 pct 적용.
+    # 사용자가 --vb-sl-pct 1.5 주면 SL distance 가 entry × 1.5% 를 절대 안 넘음.
+    fallback_sl = entry_price * (1 - fallback_sl_pct / 100)
+    if sl < fallback_sl:
+        sl = fallback_sl
     return int(tp), int(sl)
 
 

@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ks_ws Trade Review</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/plotly.min.js"></script>
+<script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR",
+                 sans-serif;
+    margin: 0; padding: 0; background: #f5f7fa; color: #1a1a2e;
+  }
+  .app {
+    display: grid;
+    grid-template-columns: 200px 1fr 200px;
+    gap: 10px;
+    padding: 10px;
+    min-height: 100vh;
+  }
+  .panel { padding: 10px; }
+  /* 태블릿 — 좌사이드바 + 메인 / 평가 아래로 */
+  @media (max-width: 1100px) {
+    .app {
+      grid-template-columns: 260px 1fr;
+      grid-template-areas: "side main" "side eval";
+      grid-template-rows: auto auto;
+    }
+    .panel:nth-child(1) { grid-area: side; }
+    .panel:nth-child(2) { grid-area: main; }
+    .panel:nth-child(3) { grid-area: eval; }
+  }
+  /* 모바일 — 한 줄씩 stack: 데이터선택 → 차트/정보 → 평가 */
+  @media (max-width: 760px) {
+    .app {
+      grid-template-columns: 1fr;
+      grid-template-areas: "side" "main" "eval";
+      gap: 10px;
+      padding: 10px;
+    }
+    h1 { font-size: 16px; }
+    h2 { font-size: 12px; }
+    .symbol-name { font-size: 18px; }
+    .meta-row { gap: 10px; font-size: 12px; }
+    .chart-wrap { min-height: 380px; }
+    .panel { padding: 12px; border-radius: 10px; }
+    /* 모바일에서 사이드바 panel 의 헤더 강조 */
+    .panel:nth-child(1) h1 { margin-bottom: 8px; }
+    /* 버튼 touch target 키우기 */
+    button { padding: 13px; font-size: 15px; }
+    /* 평가 panel 의 잔여 표시 sticky 하게 위로 */
+    .remaining-badge { font-size: 13px; }
+    /* trade-header 가 좁으면 wrap */
+    .trade-header { flex-wrap: wrap; gap: 8px; }
+    .pnl-badge { font-size: 13px; }
+  }
+  .panel {
+    background: white; border-radius: 12px; padding: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; color: #2c3e50; }
+  h2 { font-size: 14px; margin: 16px 0 8px; color: #34495e;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
+  select, input[type=text], textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid #ddd;
+    border-radius: 6px; font-size: 13px; margin-bottom: 12px;
+    background: white; font-family: inherit;
+  }
+  select:focus, input:focus, textarea:focus {
+    outline: none; border-color: #3498db;
+  }
+  textarea { min-height: 80px; resize: vertical; }
+  .checkbox { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .checkbox input { margin: 0; }
+  button {
+    width: 100%; padding: 10px; border: none; border-radius: 6px;
+    font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: 8px;
+    transition: all 0.15s;
+  }
+  button:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-good { background: #27ae60; color: white; }
+  .btn-bad { background: #e74c3c; color: white; }
+  .btn-unsure { background: #95a5a6; color: white; }
+  .stat-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px; margin-bottom: 12px;
+  }
+  .stat-box {
+    text-align: center; padding: 8px; border-radius: 6px;
+    background: #f8f9fa;
+  }
+  .stat-value { font-size: 18px; font-weight: 700; color: #2c3e50; }
+  .stat-label { font-size: 11px; color: #888; text-transform: uppercase; }
+  .trade-header { display: flex; justify-content: space-between; align-items: baseline; }
+  .symbol-name { font-size: 22px; font-weight: 700; color: #2c3e50; }
+  .pnl-badge {
+    padding: 4px 10px; border-radius: 6px; font-size: 14px; font-weight: 600;
+  }
+  .pnl-pos { background: #d4edda; color: #155724; }
+  .pnl-neg { background: #f8d7da; color: #721c24; }
+  .meta-row {
+    display: flex; gap: 16px; margin: 8px 0 16px; font-size: 13px; color: #555;
+    flex-wrap: wrap;
+  }
+  .meta-row b { color: #2c3e50; }
+  .reason-card {
+    background: #f8f9fa; border-left: 3px solid #3498db; padding: 12px;
+    border-radius: 6px; margin-top: 16px; font-size: 13px; line-height: 1.6;
+  }
+  .uncertain-card {
+    background: #fff8e1; border-left: 3px solid #f39c12; padding: 12px;
+    border-radius: 6px; margin-top: 12px; font-size: 13px;
+  }
+  .empty-card {
+    text-align: center; padding: 40px; color: #888;
+  }
+  .chart-wrap { margin-top: 16px; min-height: 620px; overflow-x: auto; overflow-y: hidden; }
+  .daily-chart-wrap { margin-top: 16px; min-height: 620px; }
+  .loading { color: #888; font-style: italic; padding: 20px; text-align: center; }
+  .remaining-badge {
+    font-size: 12px; color: #888; margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- Sidebar Left -->
+  <div class="panel">
+    <h1>📈 ks_ws Trade Review</h1>
+
+    <h2>데이터 선택</h2>
+    <label>Backtest</label>
+    <select v-model="backtestDir" @change="onFilterChange">
+      <option v-for="d in backtestDirs" :key="d" :value="d">{{ d }}</option>
+    </select>
+
+    <label>Mode (전략)</label>
+    <select v-model="mode" @change="onFilterChange">
+      <option v-for="m in modes" :key="m.id" :value="m.id">{{ m.label }}</option>
+    </select>
+
+    <label>종목</label>
+    <select v-model="symbol" @change="onSymbolChange">
+      <option value="">(전체)</option>
+      <option v-for="s in symbols" :key="s.symbol" :value="s.symbol">
+        {{ s.symbol }} {{ s.name }} ({{ s.count }}회)
+      </option>
+    </select>
+
+    <label>거래 날짜</label>
+    <select v-model="date" @change="onDateChange">
+      <option value="">(전체)</option>
+      <option v-for="d in dates" :key="d" :value="d">{{ d }}</option>
+    </select>
+
+    <label v-if="tradeList.length > 0">
+      회차 ({{ tradeList.length }}건 — ✓=평가 완료)
+    </label>
+    <select v-if="tradeList.length > 0" v-model.number="tradeIndex"
+            @change="onTradeIndexChange">
+      <option v-for="(t, i) in tradeList" :key="i" :value="i">
+        {{ i+1 }}회 — {{ t.entry_date }} {{ formatTime(t.entry_ts) }}
+        ({{ t.pnl_krw >= 0 ? '+' : '' }}{{ t.pnl_krw.toLocaleString() }}원)
+        {{ t.evaluated ? '✓' : '' }}
+      </option>
+    </select>
+
+    <div class="checkbox">
+      <input type="checkbox" id="unc" v-model="uncertainOnly" @change="loadTradesAndPick">
+      <label for="unc" style="margin:0; cursor:pointer;">
+        Claude 의문 케이스만 (~10%)
+      </label>
+    </div>
+
+    <h2>📊 평가 통계</h2>
+    <div class="stat-grid">
+      <div class="stat-box">
+        <div class="stat-value" style="color:#27ae60;">{{ stats.good || 0 }}</div>
+        <div class="stat-label">잘함</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-value" style="color:#e74c3c;">{{ stats.bad || 0 }}</div>
+        <div class="stat-label">잘못</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-value" style="color:#95a5a6;">{{ stats.unsure || 0 }}</div>
+        <div class="stat-label">의문</div>
+      </div>
+    </div>
+    <div style="font-size:12px; color:#666;">
+      총 평가: <b>{{ stats.total_evaluated || 0 }}</b> / {{ stats.total_trades || 0 }}
+    </div>
+  </div>
+
+  <!-- Main panel -->
+  <div class="panel">
+    <div v-if="loading" class="loading">로딩 중…</div>
+    <div v-else-if="!trade" class="empty-card">
+      🎉 이 필터의 모든 trade 평가 완료!<br>
+      <small>다른 필터 / mode / 날짜로 이동하세요.</small><br><br>
+      <small>매칭: {{ lastMatched }}개</small>
+    </div>
+
+    <!-- chart-wrap 은 v-if 트리 밖 — 항상 mount 되어 ref binding 안정 -->
+    <div v-show="trade && !loading">
+      <div v-if="trade" class="trade-header">
+        <div>
+          <div class="symbol-name">{{ trade.symbol }} {{ trade.name }}</div>
+          <div style="font-size:12px; color:#888; margin-top:2px;">
+            섹터: <b>{{ trade.sector }}</b>
+          </div>
+        </div>
+        <span :class="['pnl-badge', trade.pnl_krw >= 0 ? 'pnl-pos' : 'pnl-neg']">
+          {{ trade.pnl_krw >= 0 ? '+' : '' }}{{ trade.pnl_krw.toLocaleString() }}원
+          ({{ trade.pnl_pct >= 0 ? '+' : '' }}{{ trade.pnl_pct.toFixed(2) }}%)
+        </span>
+      </div>
+
+      <div v-if="trade" class="meta-row">
+        <span>📅 <b>{{ trade.entry_date }}</b></span>
+        <span>매수: <b>{{ trade.entry_price.toLocaleString() }}원</b>
+              ({{ formatTime(trade.entry_ts) }})</span>
+        <span>매도: <b>{{ trade.exit_price.toLocaleString() }}원</b>
+              ({{ formatTime(trade.exit_ts) }})</span>
+        <span>보유: <b>{{ trade.hold_minutes }}분</b></span>
+      </div>
+
+      <!-- 항상 mount. v-show 또는 display 로만 visibility 제어 -->
+      <div class="chart-wrap" :ref="setChartEl">
+        <div class="loading">차트 초기화 중… (Plotly: <span id="plotly-status">{{ plotlyStatus }}</span>)</div>
+      </div>
+      <div v-if="chartDebug" style="font-size:11px; color:#888; padding:4px 12px;">
+        {{ chartDebug }}
+      </div>
+
+      <!-- 일봉 (매매일 ±10거래일) -->
+      <div class="daily-chart-wrap" :ref="setDailyChartEl">
+        <div class="loading">일봉 로딩 중…</div>
+      </div>
+
+      <div v-if="trade" class="reason-card">
+        <b>📋 매매 로직 ({{ modeLabel }})</b><br>
+        {{ trade.rule }}<br><br>
+        <b>🎯 청산 사유 추정</b>: {{ exitKind }}
+      </div>
+
+      <div v-if="trade && trade.is_uncertain" class="uncertain-card">
+        🤔 <b>Claude 의문 케이스</b> — 짧은 손절 또는 PnL 극단값이라 명확한 이유 파악 X.
+        오른쪽 박스에 사유 적어주면 차후 전략 개선에 사용.
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar Right -->
+  <div class="panel">
+    <h2>🎯 사용자 평가</h2>
+    <div v-if="trade" class="remaining-badge">잔여: <b>{{ remaining }}</b>개</div>
+
+    <textarea
+      v-if="trade"
+      v-model="note"
+      placeholder="이 매매에 대한 피드백 (선택) — 상한가 미청산 / 손절 누락 / 수급 약함 등 자유 기술"
+    ></textarea>
+
+    <button class="btn-good" :disabled="!trade || saving" @click="evaluate('good')">
+      ✅ 잘한 판단
+    </button>
+    <button class="btn-bad" :disabled="!trade || saving" @click="evaluate('bad')">
+      ❌ 잘못된 판단
+    </button>
+    <button class="btn-unsure" :disabled="!trade || saving" @click="evaluate('unsure')">
+      🤷 잘 모름
+    </button>
+
+    <div style="font-size:11px; color:#888; margin-top:16px; line-height:1.5;">
+      한 번 평가한 scene 은 자동 skip — 다음 미평가 trade 로 이동합니다.
+      평가 결과는 <code>data/trade_evaluations.sqlite</code> 에 누적.
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted, watch, nextTick } = Vue;
+
+createApp({
+  setup() {
+    const backtestDirs = ref([]);
+    const modes = ref([]);
+    const backtestDir = ref('');
+    const mode = ref('V4');
+    const symbol = ref('');
+    const date = ref('');
+    const uncertainOnly = ref(false);
+    const symbols = ref([]);
+    const dates = ref([]);
+    const trade = ref(null);
+    const tradeList = ref([]);
+    const tradeIndex = ref(0);
+    const remaining = ref(0);
+    const lastMatched = ref(0);
+    const stats = ref({});
+    const loading = ref(false);
+    const saving = ref(false);
+    const note = ref('');
+    const chart = ref(null);
+    const dailyChart = ref(null);
+    const chartDebug = ref('');
+    const plotlyStatus = ref(typeof Plotly !== 'undefined' ? 'loaded' : 'loading…');
+    // function ref — Vue 의 자동 ref binding 실패 케이스 회피
+    function setChartEl(el) {
+      chart.value = el;
+    }
+    function setDailyChartEl(el) {
+      dailyChart.value = el;
+    }
+
+    const modeLabel = computed(() => {
+      const m = modes.value.find(m => m.id === mode.value);
+      return m ? m.label : mode.value;
+    });
+
+    const exitKind = computed(() => {
+      if (!trade.value) return '';
+      const pct = trade.value.pnl_pct;
+      const hold = trade.value.hold_minutes;
+      if (pct > 1.5) return 'TP (목표가 도달)';
+      if (pct < -1.0) return 'SL (손절선 이탈)';
+      if (hold >= 200) return 'timeout (max_hold 240분 도달)';
+      return 'trailing / 중간 청산';
+    });
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+
+    async function loadModes() {
+      const r = await axios.get('/api/modes');
+      modes.value = r.data.modes;
+      backtestDirs.value = r.data.backtest_dirs;
+      backtestDir.value = r.data.default_backtest_dir;
+      mode.value = r.data.default_mode;
+      await onFilterChange();
+    }
+
+    async function loadSymbols() {
+      const r = await axios.get('/api/symbols', {
+        params: { backtest_dir: backtestDir.value, mode: mode.value },
+      });
+      symbols.value = r.data.symbols;
+    }
+
+    async function loadDates() {
+      const r = await axios.get('/api/dates', {
+        params: {
+          backtest_dir: backtestDir.value, mode: mode.value,
+          symbol: symbol.value || undefined,
+        },
+      });
+      dates.value = r.data.dates;
+    }
+
+    async function loadStats() {
+      const r = await axios.get('/api/stats', {
+        params: { backtest_dir: backtestDir.value, mode: mode.value },
+      });
+      stats.value = r.data;
+    }
+
+    async function loadTradesAndPick() {
+      // 종목 + 날짜 filter 의 trade list 로딩 + 첫 미평가 trade 자동 선택
+      loading.value = true;
+      trade.value = null;
+      note.value = '';
+      try {
+        const r = await axios.get('/api/trades_list', {
+          params: {
+            backtest_dir: backtestDir.value, mode: mode.value,
+            symbol: symbol.value || undefined,
+            date: date.value || undefined,
+          },
+        });
+        let list = r.data.trades;
+        if (uncertainOnly.value) {
+          list = list.filter(t => t.is_uncertain);
+        }
+        tradeList.value = list;
+        if (list.length === 0) {
+          tradeIndex.value = 0;
+          lastMatched.value = 0;
+          remaining.value = 0;
+        } else {
+          // 첫 미평가 trade 로 jump
+          const firstUnEval = list.findIndex(t => !t.evaluated);
+          tradeIndex.value = firstUnEval >= 0 ? firstUnEval : 0;
+          lastMatched.value = list.length;
+          remaining.value = list.filter(t => !t.evaluated).length;
+          trade.value = list[tradeIndex.value];
+          await nextTick();
+          await drawChart();
+        }
+      } finally {
+        loading.value = false;
+      }
+    }
+
+    async function onTradeIndexChange() {
+      const i = tradeIndex.value;
+      if (i >= 0 && i < tradeList.value.length) {
+        trade.value = tradeList.value[i];
+        note.value = '';
+        await nextTick();
+        await drawChart();
+      }
+    }
+
+    // 호환 alias — 기존 호출 위치 유지
+    const loadNextTrade = loadTradesAndPick;
+
+    async function drawChart() {
+      if (!trade.value) return;
+      chartDebug.value = '1) drawChart 시작';
+      // Vue ref timing: v-if 로 마운트된 div 가 ref 에 binding 될 때까지 wait
+      for (let i = 0; i < 30; i++) {
+        await nextTick();
+        if (chart.value) break;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      chartDebug.value = '2) chart ref: ' + (chart.value ? 'bound' : 'NULL');
+      if (!chart.value) return;
+      plotlyStatus.value = typeof Plotly !== 'undefined' ? 'loaded' : 'MISSING';
+      if (typeof Plotly === 'undefined') {
+        chart.value.innerHTML = '<div class="loading" style="color:red;">'
+          + 'Plotly 라이브러리 미로드. /static/plotly.min.js 확인 필요.</div>';
+        return;
+      }
+      chartDebug.value = '3) Plotly ' + (Plotly.version || '?') + ' OK, bars fetching...';
+      chart.value.innerHTML = '<div class="loading">차트 로딩 중…</div>';
+      let bars, prevDayClose;
+      try {
+        const r = await axios.get('/api/bars', {
+          params: { symbol: trade.value.symbol, date: trade.value.entry_date },
+        });
+        bars = r.data.bars;
+        prevDayClose = r.data.prev_close;
+      } catch (e) {
+        chart.value.innerHTML = `<div class="loading" style="color:red;">`
+          + `bars API 오류: ${e.message}</div>`;
+        return;
+      }
+      chartDebug.value = '4) bars: ' + (bars ? bars.length : 'null');
+      if (!bars || !bars.length) {
+        chart.value.innerHTML = '<div class="loading">분봉 데이터 없음 '
+          + `(symbol=${trade.value.symbol}, date=${trade.value.entry_date})</div>`;
+        return;
+      }
+      try {
+        // plotly 가 ISO+tz 문자열 파싱 일관성을 위해 KST 문자열에서 tz 떼고 사용
+        const stripTz = s => s.replace(/[+-]\d{2}:\d{2}$/, '');
+        // 분 단위로 자른 키 — entry/exit ts 를 분봉 ts 에 snap 하기 위함
+        const minuteKey = s => stripTz(s).slice(0, 16);
+        const tsMs = s => new Date(stripTz(s)).getTime();
+        // entry_ts / exit_ts 의 분봉 찾기 — 1순위 분 정확 매치, 2순위 가장 가까운 bar (≤60초)
+        const findBar = ts => {
+          const k = minuteKey(ts);
+          const exact = bars.find(b => minuteKey(b.timestamp) === k);
+          if (exact) return exact;
+          const t = tsMs(ts);
+          let best = null, bestDiff = Infinity;
+          for (const b of bars) {
+            const d = Math.abs(tsMs(b.timestamp) - t);
+            if (d < bestDiff) { bestDiff = d; best = b; }
+          }
+          return (bestDiff <= 60000) ? best : null;
+        };
+        // 거래대금 KRW → 백만 단위 (천만/억 으로 보기 쉽게)
+        const xs = bars.map(b => stripTz(b.timestamp));
+        // 각 분봉의 전일종가 대비 % (close 기준)
+        const fmtPct = (cur, base) => {
+          if (!base || base <= 0) return '';
+          const p = (cur - base) / base * 100;
+          return ` (${p >= 0 ? '+' : ''}${p.toFixed(2)}%)`;
+        };
+        const candleText = bars.map(b => prevDayClose
+          ? `전일종가 ${prevDayClose.toLocaleString()}원 대비${fmtPct(b.close, prevDayClose)}`
+          : '');
+        const candle = {
+          x: xs,
+          open: bars.map(b => b.open),
+          high: bars.map(b => b.high),
+          low: bars.map(b => b.low),
+          close: bars.map(b => b.close),
+          text: candleText,
+          type: 'candlestick', name: '분봉',
+          yaxis: 'y',
+          increasing: { line: { color: '#e74c3c' } },
+          decreasing: { line: { color: '#3498db' } },
+        };
+        // 매수 = 빨간 화살표 ↑ (분봉 low 바로 아래), 매도 = 파란 화살표 ↓ (분봉 high 바로 위)
+        const buyPrice = trade.value.entry_price;
+        const sellPrice = trade.value.exit_price;
+        const entryBar = findBar(trade.value.entry_ts);
+        const exitBar = findBar(trade.value.exit_ts);
+        // x 는 분봉 timestamp 와 정확히 일치 (봉 중심에 정렬). bar 못 찾으면 fallback.
+        const buyX = entryBar ? stripTz(entryBar.timestamp) : stripTz(trade.value.entry_ts);
+        const sellX = exitBar ? stripTz(exitBar.timestamp) : stripTz(trade.value.exit_ts);
+        // y 는 봉의 low/high 기준 — 봉 모양과 안 겹치되 가깝게 (0.1%)
+        const buyY = entryBar ? entryBar.low * 0.999 : buyPrice * 0.999;
+        const sellY = exitBar ? exitBar.high * 1.001 : sellPrice * 1.001;
+        const buyArrow = {
+          x: [buyX],
+          y: [buyY],
+          mode: 'markers+text', type: 'scatter',
+          marker: { color: '#e74c3c', size: 9, symbol: 'triangle-up' },
+          text: [`매수 ${buyPrice.toLocaleString()}`],
+          textposition: 'bottom center',
+          textfont: { color: '#e74c3c', size: 11 },
+          name: '매수', yaxis: 'y',
+          hoverinfo: 'text',
+          hovertext: [`매수 ${buyPrice.toLocaleString()}원 @ ${trade.value.entry_ts}`],
+        };
+        const sellArrow = {
+          x: [sellX],
+          y: [sellY],
+          mode: 'markers+text', type: 'scatter',
+          marker: { color: '#3498db', size: 9, symbol: 'triangle-down' },
+          text: [`매도 ${sellPrice.toLocaleString()}`],
+          textposition: 'top center',
+          textfont: { color: '#3498db', size: 11 },
+          name: '매도', yaxis: 'y',
+          hoverinfo: 'text',
+          hovertext: [`매도 ${sellPrice.toLocaleString()}원 @ ${trade.value.exit_ts}`],
+        };
+        // 거래대금 (KRW, 백만 단위) bar — 매수 신호 강도 / 관심도 시각화
+        const value_bar = {
+          x: xs,
+          y: bars.map(b => b.value / 1e6),
+          type: 'bar', name: '거래대금(백만)',
+          yaxis: 'y2',
+          marker: {
+            color: bars.map(b => b.close >= b.open ? '#e74c3c' : '#3498db'),
+            opacity: 0.55,
+          },
+          hovertemplate: '%{x}<br>거래대금: %{y:,.0f}백만원<extra></extra>',
+        };
+        const isMobile = window.innerWidth < 760;
+        // 차트 가로 2.5x — 같은 봉수가 2.5x 폭으로 펼쳐져 봉도 2.5x 굵게
+        const containerW = chart.value.offsetWidth || 1000;
+        const plotW = isMobile ? containerW : Math.floor(containerW * 2.5);
+        const layout = {
+          width: plotW,
+          height: isMobile ? 460 : 620,
+          dragmode: 'pan',  // 클릭 드래그 = 횡이동 (zoom box 가 아닌 pan)
+          xaxis: {
+            rangeslider: { visible: false }, type: 'date',
+            anchor: 'y2',
+          },
+          yaxis: {
+            domain: [0.28, 1.0], title: { text: '가격' },
+            tickformat: ',d',
+          },
+          yaxis2: {
+            domain: [0.0, 0.22], title: { text: '거래대금(백만)' },
+            tickformat: ',d',
+          },
+          margin: isMobile
+            ? { l: 50, r: 8, t: 8, b: 32 }
+            : { l: 60, r: 20, t: 10, b: 40 },
+          legend: { orientation: 'h', y: 1.06,
+                    font: { size: isMobile ? 10 : 12 } },
+          font: { size: isMobile ? 10 : 12 },
+          showlegend: true,
+          bargap: 0.1,
+        };
+        chart.value.innerHTML = '';
+        await Plotly.newPlot(chart.value, [candle, buyArrow, sellArrow, value_bar],
+                             layout, {
+                               displaylogo: false, responsive: true,
+                               scrollZoom: true,  // 마우스 휠 = zoom in/out
+                               modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+                             });
+        chartDebug.value = '';  // 완료 후 디버그 메시지 제거
+      } catch (e) {
+        console.error('plot error', e);
+        chart.value.innerHTML = `<div class="loading" style="color:red;">`
+          + `차트 렌더링 오류: ${e.message}</div>`;
+      }
+      // 분봉 차트 그린 후 일봉 차트도 갱신
+      drawDailyChart();
+    }
+
+    async function drawDailyChart() {
+      if (!trade.value || !dailyChart.value) return;
+      dailyChart.value.innerHTML = '<div class="loading">일봉 로딩 중…</div>';
+      let bars, tradeIdx;
+      try {
+        const r = await axios.get('/api/daily_bars', {
+          params: { symbol: trade.value.symbol, date: trade.value.entry_date, window: 10 },
+        });
+        bars = r.data.bars;
+        tradeIdx = r.data.trade_idx;
+      } catch (e) {
+        dailyChart.value.innerHTML = `<div class="loading" style="color:red;">`
+          + `일봉 API 오류: ${e.message}</div>`;
+        return;
+      }
+      if (!bars || !bars.length) {
+        dailyChart.value.innerHTML = '<div class="loading">일봉 데이터 없음</div>';
+        return;
+      }
+      try {
+        const xs = bars.map(b => b.timestamp.slice(0, 10));  // YYYY-MM-DD
+        // 각 일봉의 직전 일봉 close 대비 % — 첫 봉은 base 없어 빈 string
+        const dailyText = bars.map((b, i) => {
+          if (i === 0) return '';
+          const base = bars[i - 1].close;
+          if (!base || base <= 0) return '';
+          const p = (b.close - base) / base * 100;
+          return `전일종가 ${base.toLocaleString()}원 대비 (${p >= 0 ? '+' : ''}${p.toFixed(2)}%)`;
+        });
+        const candle = {
+          x: xs,
+          open: bars.map(b => b.open),
+          high: bars.map(b => b.high),
+          low: bars.map(b => b.low),
+          close: bars.map(b => b.close),
+          text: dailyText,
+          type: 'candlestick', name: '일봉',
+          yaxis: 'y',
+          increasing: { line: { color: '#e74c3c' } },
+          decreasing: { line: { color: '#3498db' } },
+        };
+        const value_bar = {
+          x: xs,
+          y: bars.map(b => b.value / 1e8),  // 억 단위
+          type: 'bar', name: '거래대금(억)',
+          yaxis: 'y2',
+          marker: {
+            color: bars.map(b => b.close >= b.open ? '#e74c3c' : '#3498db'),
+            opacity: 0.55,
+          },
+          hovertemplate: '%{x}<br>거래대금: %{y:,.0f}억<extra></extra>',
+        };
+        // 매매일 표시 마커
+        const traces = [candle, value_bar];
+        if (tradeIdx >= 0 && tradeIdx < bars.length) {
+          const tb = bars[tradeIdx];
+          traces.push({
+            x: [xs[tradeIdx]],
+            y: [tb.high * 1.01],
+            mode: 'markers+text', type: 'scatter',
+            marker: { color: '#f39c12', size: 14, symbol: 'star' },
+            text: ['매매일'],
+            textposition: 'top center',
+            textfont: { color: '#f39c12', size: 11 },
+            name: '매매일', yaxis: 'y',
+            hoverinfo: 'text',
+            hovertext: [`매매일 ${xs[tradeIdx]}`],
+          });
+        }
+        const isMobile = window.innerWidth < 760;
+        // 분봉과 같은 포맷 (height/domain/bargap 통일). 가로는 컨테이너 100% (분봉의 2.5x 강제 X — 일봉 21봉이라 굵어짐 방지)
+        const layout = {
+          height: isMobile ? 460 : 620,
+          dragmode: 'pan',
+          xaxis: {
+            rangeslider: { visible: false }, type: 'category',
+            anchor: 'y2',
+          },
+          yaxis: {
+            domain: [0.28, 1.0], title: { text: '가격' },
+            tickformat: ',d',
+          },
+          yaxis2: {
+            domain: [0.0, 0.22], title: { text: '거래대금(억)' },
+            tickformat: ',d',
+          },
+          margin: isMobile
+            ? { l: 50, r: 8, t: 8, b: 32 }
+            : { l: 60, r: 20, t: 10, b: 40 },
+          legend: { orientation: 'h', y: 1.06,
+                    font: { size: isMobile ? 10 : 12 } },
+          font: { size: isMobile ? 10 : 12 },
+          showlegend: true,
+          bargap: 0.1,
+        };
+        dailyChart.value.innerHTML = '';
+        await Plotly.newPlot(dailyChart.value, traces, layout, {
+          displaylogo: false, responsive: true, scrollZoom: true,
+          modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+        });
+      } catch (e) {
+        console.error('daily plot error', e);
+        dailyChart.value.innerHTML = `<div class="loading" style="color:red;">`
+          + `일봉 차트 오류: ${e.message}</div>`;
+      }
+    }
+
+    async function evaluate(verdict) {
+      if (!trade.value) return;
+      saving.value = true;
+      try {
+        await axios.post('/api/evaluate', {
+          backtest_dir: backtestDir.value, mode: mode.value,
+          symbol: trade.value.symbol,
+          entry_ts: trade.value.entry_ts,
+          exit_ts: trade.value.exit_ts,
+          verdict, note: note.value,
+        });
+        // 현재 회차 평가 완료 표시 + 다음 미평가 자동 이동
+        if (tradeList.value[tradeIndex.value]) {
+          tradeList.value[tradeIndex.value].evaluated = true;
+        }
+        remaining.value = tradeList.value.filter(t => !t.evaluated).length;
+        const nextUnEval = tradeList.value.findIndex(
+          (t, i) => i > tradeIndex.value && !t.evaluated
+        );
+        if (nextUnEval >= 0) {
+          tradeIndex.value = nextUnEval;
+          trade.value = tradeList.value[nextUnEval];
+          note.value = '';
+          await nextTick();
+          await drawChart();
+        } else {
+          // 처음부터 다시 미평가 찾기 (앞쪽에 있을 수도)
+          const earlier = tradeList.value.findIndex(t => !t.evaluated);
+          if (earlier >= 0) {
+            tradeIndex.value = earlier;
+            trade.value = tradeList.value[earlier];
+            note.value = '';
+            await nextTick();
+            await drawChart();
+          } else {
+            trade.value = null;  // 전체 완료
+          }
+        }
+        await loadStats();
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    async function onFilterChange() {
+      await Promise.all([loadSymbols(), loadStats()]);
+      if (symbols.value.length > 0) {
+        symbol.value = symbols.value[0].symbol;
+      } else {
+        symbol.value = '';
+      }
+      await loadDates();
+      // 종목 선택 후 날짜는 (전체) — 그 종목 모든 회차 자동 navigate
+      date.value = '';
+      await loadTradesAndPick();
+    }
+
+    async function onSymbolChange() {
+      await loadDates();
+      date.value = '';
+      await loadTradesAndPick();
+    }
+
+    async function onDateChange() {
+      await loadTradesAndPick();
+    }
+
+    onMounted(loadModes);
+
+    return {
+      backtestDirs, modes, backtestDir, mode, symbol, date,
+      uncertainOnly, symbols, dates, trade, tradeList, tradeIndex,
+      remaining, lastMatched, stats,
+      loading, saving, note, chart, dailyChart, chartDebug, plotlyStatus,
+      setChartEl, setDailyChartEl, modeLabel, exitKind,
+      formatTime, onFilterChange, onSymbolChange, onDateChange,
+      onTradeIndexChange, loadNextTrade, loadTradesAndPick, evaluate,
+    };
+  },
+}).mount('#app');
+</script>
+</body>
+</html>
